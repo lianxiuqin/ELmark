@@ -31,6 +31,11 @@ export function decodeLocalAssetUrl(requestUrl: string): string | null {
     return null;
   }
 
+  // Reject UNC/network prefixes (e.g. \\host\share, //host/share) and trailing-separator directory paths.
+  if (/^[\\/]{2}/.test(rawPath) || /[\\/]$/.test(rawPath)) {
+    return null;
+  }
+
   const segments = rawPath.split(/[\\/]+/);
   if (segments.includes('..')) {
     return null;

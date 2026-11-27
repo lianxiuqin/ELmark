@@ -55,6 +55,21 @@ describe('decodeLocalAssetUrl', () => {
     expect(decodeLocalAssetUrl(`elmark-local://asset?path=${encodeURIComponent('E:\\docs\\..\\secret.png')}`)).toBeNull();
     expect(decodeLocalAssetUrl('http://example.com/a.png')).toBeNull();
   });
+
+  it('rejects Windows UNC/network paths and trailing-separator directory paths', () => {
+    expect(
+      decodeLocalAssetUrl(`elmark-local://asset?path=${encodeURIComponent('\\\\attacker\\share\\a.png')}`),
+    ).toBeNull();
+    expect(
+      decodeLocalAssetUrl(`elmark-local://asset?path=${encodeURIComponent('//attacker/share/a.png')}`),
+    ).toBeNull();
+    expect(
+      decodeLocalAssetUrl(`elmark-local://asset?path=${encodeURIComponent('E:\\folder.png\\')}`),
+    ).toBeNull();
+    expect(
+      decodeLocalAssetUrl(`elmark-local://asset?path=${encodeURIComponent('E:/folder.png/')}`),
+    ).toBeNull();
+  });
 });
 
 describe('DocumentFileWatcher (Review Focus #4)', () => {
