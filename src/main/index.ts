@@ -78,6 +78,7 @@ function extractInitialMarkdownArg(argv: string[]): string | null {
   return null;
 }
 
+const isSmokeTest = process.argv.includes('--smoke-test');
 let pendingInitialFile: string | null = extractInitialMarkdownArg(process.argv);
 const windowWatchers = new Map<number, DocumentFileWatcher>();
 
@@ -203,6 +204,9 @@ function createMainWindow(): BrowserWindow {
   getOrCreateWatcher(webContentsId);
 
   win.once('ready-to-show', () => {
+    if (isSmokeTest) {
+      return;
+    }
     if (savedState.isMaximized) {
       win.maximize();
     }
@@ -498,6 +502,119 @@ function registerIpcHandlers(): void {
   });
 }
 
+interface SmokeCheckResult {
+  hasRoot: boolean;
+  hasApp: boolean;
+  hasEditor: boolean;
+  editorTextLength: number;
+  title: string;
+}
+
+/**
+ * Runs headless startup verification for `--smoke-test` without stealing focus.
+ */
+function attachSmokeTest(win: BrowserWindow, expectLoadedDocument: boolean): void {
+  const consoleErrors: string[] = [];
+  let settled = false;
+  let checkTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const cleanupTimers = (): void => {
+    clearTimeout(failsafeTimer);
+    if (checkTimer !== null) {
+      clearTimeout(checkTimer);
+      checkTimer = null;
+    }
+  };
+
+  const failSmokeTest = (reason: string): void => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    cleanupTimers();
+    console.error(`[ELmark] smoke-test failed: ${reason}`);
+    app.exit(1);
+  };
+
+  const passSmokeTest = (): void => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    cleanupTimers();
+    console.log('[ELmark] smoke-test passed');
+    app.exit(0);
+  };
+
+  const failsafeTimer = setTimeout(() => {
+    failSmokeTest('timed out after 15000ms');
+  }, 15_000);
+
+  win.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    if (level >= 3) {
+      consoleErrors.push(`${message} (${sourceId}:${line})`);
+    }
+  });
+
+  win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+    failSmokeTest(`did-fail-load (${errorCode}): ${errorDescription} at ${validatedURL}`);
+  });
+
+  win.webContents.on('render-process-gone', (_event, details) => {
+    failSmokeTest(`render-process-gone: ${details.reason} (exitCode=${details.exitCode})`);
+  });
+
+  win.webContents.once('did-finish-load', () => {
+    checkTimer = setTimeout(() => {
+      void (async () => {
+        if (settled) {
+          return;
+        }
+        if (win.isDestroyed()) {
+          failSmokeTest('window was destroyed before smoke verification');
+          return;
+        }
+        if (consoleErrors.length > 0) {
+          failSmokeTest(`renderer console error(s): ${consoleErrors.join('; ')}`);
+          return;
+        }
+
+        try {
+          const result = (await win.webContents.executeJavaScript(`(() => {
+            const root = document.getElementById('root');
+            const appEl = root ? root.querySelector('.elmark-app') : null;
+            const editorEl = appEl ? appEl.querySelector('.ProseMirror') : null;
+            return {
+              hasRoot: Boolean(root),
+              hasApp: Boolean(appEl),
+              hasEditor: Boolean(editorEl),
+              editorTextLength: editorEl ? (editorEl.textContent || '').trim().length : 0,
+              title: document.title,
+            };
+          })()`)) as SmokeCheckResult;
+
+          if (!result.hasRoot || !result.hasApp || !result.hasEditor) {
+            failSmokeTest(
+              `missing expected DOM nodes (hasRoot=${result.hasRoot}, hasApp=${result.hasApp}, hasEditor=${result.hasEditor})`,
+            );
+            return;
+          }
+
+          if (expectLoadedDocument && result.editorTextLength === 0) {
+            failSmokeTest('expected initial markdown document to render non-empty editor content');
+            return;
+          }
+
+          passSmokeTest();
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          failSmokeTest(`executeJavaScript threw: ${message}`);
+        }
+      })();
+    }, 1200);
+  });
+}
+
 app.whenReady().then(() => {
   registerProtocolHandlers();
   registerCspHeaders();
@@ -510,7 +627,11 @@ app.whenReady().then(() => {
   );
   Menu.setApplicationMenu(appMenu);
 
-  createMainWindow();
+  const expectInitialDocument = Boolean(pendingInitialFile);
+  const mainWindow = createMainWindow();
+  if (isSmokeTest) {
+    attachSmokeTest(mainWindow, expectInitialDocument);
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

@@ -1,0 +1,22 @@
+appId: com.elmark.desktop
+productName: ELmark
+directories:
+  output: dist
+files:
+  - "out/**/*"
+  - "package.json"
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: dir
+      arch:
+        - x64
+fileAssociations:
+  - ext: md
+    name: Markdown Document
+    description: Markdown Document
+  - ext: markdown
+    name: Markdown Document
+    description: Markdown Document
