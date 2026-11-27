@@ -12,7 +12,8 @@
     "preview": "electron-vite preview",
     "test": "vitest run",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
-    "build:win": "npm run build && electron-builder --win --dir"
+    "build:win": "npm run build && electron-builder --win --dir",
+    "dist:win": "npm run build && electron-builder --win nsis --publish never"
   },
   "dependencies": {
     "@milkdown/kit": "^7.19.1",

@@ -14,6 +14,13 @@ win:
     - target: dir
       arch:
         - x64
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  artifactName: "ELmark-Setup-${version}.exe"
+  uninstallDisplayName: "ELmark ${version}"
 fileAssociations:
   - ext: md
     name: Markdown Document
