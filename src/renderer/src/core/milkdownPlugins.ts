@@ -17,6 +17,7 @@ import { renderMermaidDiagram } from './mermaidRenderer';
 const lowlight = createLowlight(common);
 const CODE_HIGHLIGHT_PLUGIN_KEY = new PluginKey('ELMARK_CODE_HIGHLIGHT');
 const MERMAID_DEBOUNCE_MS = 300;
+const BLOCK_HTML_TAG_RE = /<(?:details|div|p|table|ul|ol|pre|hr|blockquote|section|article|h[1-6])\b/i;
 
 interface HastChild {
   type: string;
@@ -195,7 +196,8 @@ function createStandardCodeBlockView(
     fontFamily: 'var(--font-mono)',
     fontSize: '11px',
     textAlign: 'right',
-    opacity: '0.65',
+    opacity: '0',
+    transition: 'opacity 150ms ease',
     outline: 'none',
   });
 
@@ -220,11 +222,27 @@ function createStandardCodeBlockView(
   dom.appendChild(langInput);
   dom.appendChild(pre);
 
+  let isHovered = false;
+  let isInputFocused = false;
+  const syncInputVisibility = (): void => {
+    langInput.style.opacity = isHovered || isInputFocused ? '1' : '0';
+  };
+
+  dom.addEventListener('mouseenter', () => {
+    isHovered = true;
+    syncInputVisibility();
+  });
+  dom.addEventListener('mouseleave', () => {
+    isHovered = false;
+    syncInputVisibility();
+  });
   langInput.addEventListener('focus', () => {
-    langInput.style.opacity = '1';
+    isInputFocused = true;
+    syncInputVisibility();
   });
   langInput.addEventListener('blur', () => {
-    langInput.style.opacity = '0.65';
+    isInputFocused = false;
+    syncInputVisibility();
     updateCodeBlockLanguage(view, getPos, langInput.value);
   });
   langInput.addEventListener('keydown', (event) => {
@@ -278,6 +296,7 @@ function createMermaidCodeBlockView(
   const dom = document.createElement('div');
   dom.className = 'elmark-mermaid';
   dom.contentEditable = 'false';
+  dom.tabIndex = -1;
 
   const header = document.createElement('div');
   header.style.display = 'none';
@@ -447,6 +466,23 @@ function createMermaidCodeBlockView(
     }
   });
 
+  dom.addEventListener('mousedown', (event) => {
+    if (!isEditing) {
+      return;
+    }
+    const target = event.target;
+    if (
+      target === textarea ||
+      target === langInput ||
+      target === doneBtn ||
+      (target instanceof Node && (textarea.contains(target) || langInput.contains(target)))
+    ) {
+      return;
+    }
+    // Keep focus inside the active Mermaid editor when clicking preview/error/header surfaces.
+    event.preventDefault();
+  });
+
   dom.addEventListener('focusout', (event) => {
     if (!isEditing) {
       return;
@@ -515,6 +551,8 @@ export const codeBlockViewPlugin = $view(
   },
 );
 
+export type RegisterRefreshCallback = (refresh: () => void) => () => void;
+
 /**
  * Creates the custom `html` NodeView plugin that hides comment-only HTML
  * and safely renders sanitized reading HTML via DOMPurify.
@@ -522,6 +560,7 @@ export const codeBlockViewPlugin = $view(
 export function createHtmlViewPlugin(
   getDocumentDir: () => string | null,
   onOpenExternalUrl: (url: string) => void,
+  registerRefresh?: RegisterRefreshCallback,
 ): MilkdownPlugin {
   return $view(htmlSchema.node, () => (initialNode) => {
     let currentNode = initialNode;
@@ -535,14 +574,24 @@ export function createHtmlViewPlugin(
         dom.className = 'elmark-html-comment';
         dom.setAttribute('aria-hidden', 'true');
         dom.style.display = 'none';
+        dom.style.padding = '';
+        dom.style.margin = '';
+        dom.style.border = '';
+        dom.style.background = '';
         dom.innerHTML = '';
         return;
       }
 
+      const sanitized = sanitizeReadingHtml(raw, getDocumentDir());
+      const isBlockHtml = BLOCK_HTML_TAG_RE.test(sanitized);
       dom.className = 'elmark-html-block';
       dom.removeAttribute('aria-hidden');
-      dom.style.display = 'block';
-      dom.innerHTML = sanitizeReadingHtml(raw, getDocumentDir());
+      dom.style.display = isBlockHtml ? 'block' : 'inline';
+      dom.style.padding = isBlockHtml ? '' : '0';
+      dom.style.margin = isBlockHtml ? '' : '0';
+      dom.style.border = isBlockHtml ? '' : 'none';
+      dom.style.background = isBlockHtml ? '' : 'transparent';
+      dom.innerHTML = sanitized;
     };
 
     dom.addEventListener('click', (event) => {
@@ -563,6 +612,9 @@ export function createHtmlViewPlugin(
     });
 
     syncHtmlDom(String(initialNode.attrs.value ?? ''));
+    const unregister = registerRefresh?.(() => {
+      syncHtmlDom(String(currentNode.attrs.value ?? ''));
+    });
 
     return {
       dom,
@@ -584,6 +636,9 @@ export function createHtmlViewPlugin(
       ignoreMutation() {
         return true;
       },
+      destroy() {
+        unregister?.();
+      },
     };
   });
 }
@@ -594,6 +649,7 @@ export function createHtmlViewPlugin(
  */
 export function createImageViewPlugin(
   getDocumentDir: () => string | null,
+  registerRefresh?: RegisterRefreshCallback,
 ): MilkdownPlugin {
   return $view(imageSchema.node, () => (initialNode) => {
     let currentNode = initialNode;
@@ -617,6 +673,9 @@ export function createImageViewPlugin(
     };
 
     syncImageAttrs(initialNode);
+    const unregister = registerRefresh?.(() => {
+      syncImageAttrs(currentNode);
+    });
 
     return {
       dom: img,
@@ -627,6 +686,9 @@ export function createImageViewPlugin(
         currentNode = nextNode;
         syncImageAttrs(nextNode);
         return true;
+      },
+      destroy() {
+        unregister?.();
       },
     };
   });

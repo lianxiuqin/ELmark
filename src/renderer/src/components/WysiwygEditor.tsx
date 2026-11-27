@@ -107,10 +107,13 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
     const onOpenExternalUrlRef = useRef(onOpenExternalUrl);
     onOpenExternalUrlRef.current = onOpenExternalUrl;
 
-    const lastKnownMarkdownRef = useRef(markdown);
+    const lastPropMarkdownRef = useRef(markdown);
+    const lastSerializedMarkdownRef = useRef(markdown);
     const isSyncingExternalRef = useRef(false);
     const lastActiveHeadingIndexRef = useRef<number>(-1);
     const linkTargetRangeRef = useRef<{ from: number; to: number } | null>(null);
+    const documentDirRefreshCallbacksRef = useRef<Set<() => void>>(new Set());
+    const isFirstDocumentDirRenderRef = useRef(true);
 
     const [tableToolbar, setTableToolbar] = useState<FloatingPosition>({
       visible: false,
@@ -194,15 +197,20 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
         let href = '';
         let targetRange: { from: number; to: number } | null = null;
         const { from, to } = state.selection;
-        state.doc.nodesBetween(from, from === to ? to + 1 : to, (node, pos) => {
-          const mark = node.marks.find((item) => item.type === linkType);
-          if (mark) {
-            href = String(mark.attrs.href ?? '');
-            targetRange = { from: pos, to: pos + node.nodeSize };
-            return false;
-          }
-          return true;
-        });
+        const maxPos = state.doc.content.size;
+        const clampedFrom = Math.max(0, Math.min(from, maxPos));
+        const clampedTo = Math.min(maxPos, from === to ? to + 1 : to);
+        if (clampedFrom <= clampedTo) {
+          state.doc.nodesBetween(clampedFrom, clampedTo, (node, pos) => {
+            const mark = node.marks.find((item) => item.type === linkType);
+            if (mark) {
+              href = String(mark.attrs.href ?? '');
+              targetRange = { from: pos, to: pos + node.nodeSize };
+              return false;
+            }
+            return true;
+          });
+        }
 
         if (!href && anchorElement) {
           href = anchorElement.getAttribute('href') ?? '';
@@ -265,33 +273,52 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
 
       let cancelled = false;
       let createdEditor: Editor | null = null;
+      const initialMarkdown = lastPropMarkdownRef.current;
+
+      const registerRefresh = (cb: () => void) => {
+        documentDirRefreshCallbacksRef.current.add(cb);
+        return () => {
+          documentDirRefreshCallbacksRef.current.delete(cb);
+        };
+      };
 
       const htmlPlugin = createHtmlViewPlugin(
         () => documentDirRef.current,
         (url) => onOpenExternalUrlRef.current(url),
+        registerRefresh,
       );
-      const imagePlugin = createImageViewPlugin(() => documentDirRef.current);
+      const imagePlugin = createImageViewPlugin(
+        () => documentDirRef.current,
+        registerRefresh,
+      );
+
+      const dismissLinkBubble = () => {
+        linkTargetRangeRef.current = null;
+        setLinkBubble((prev) =>
+          prev.visible ? { ...prev, visible: false } : prev,
+        );
+      };
 
       const editor = Editor.make()
         .config((ctx) => {
           ctx.set(rootCtx, host);
-          ctx.set(defaultValueCtx, lastKnownMarkdownRef.current);
+          ctx.set(defaultValueCtx, initialMarkdown);
           ctx.update(editorViewOptionsCtx, (prev) => ({
             ...prev,
             handleDOMEvents: {
               ...(prev.handleDOMEvents ?? {}),
               click: (_view, event) => {
                 const target = event.target;
-                if (!(target instanceof Element)) {
-                  return false;
-                }
-                const anchor = target.closest('a');
+                const anchor =
+                  target instanceof Element ? target.closest('a') : null;
                 if (!(anchor instanceof HTMLAnchorElement)) {
+                  dismissLinkBubble();
                   return false;
                 }
                 event.preventDefault();
                 const href = anchor.getAttribute('href') ?? '';
                 if (event.ctrlKey || event.metaKey) {
+                  dismissLinkBubble();
                   if (href) {
                     onOpenExternalUrlRef.current(href);
                   }
@@ -329,15 +356,26 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
               if (nextMarkdown !== currentDocMarkdown) {
                 return;
               }
-              if (nextMarkdown === lastKnownMarkdownRef.current) {
+              if (nextMarkdown === lastSerializedMarkdownRef.current) {
                 return;
               }
-              lastKnownMarkdownRef.current = nextMarkdown;
+              lastSerializedMarkdownRef.current = nextMarkdown;
+              lastPropMarkdownRef.current = nextMarkdown;
               onChangeRef.current(nextMarkdown);
             })
-            .selectionUpdated(() => {
+            .updated(() => {
+              dismissLinkBubble();
+            })
+            .selectionUpdated((sCtx) => {
               if (createdEditor) {
                 updateTableToolbarFromEditor(createdEditor);
+              }
+              const targetRange = linkTargetRangeRef.current;
+              if (targetRange) {
+                const { from, to } = sCtx.get(editorViewCtx).state.selection;
+                if (from < targetRange.from || to > targetRange.to) {
+                  dismissLinkBubble();
+                }
               }
             });
         })
@@ -360,6 +398,15 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
           }
           createdEditor = instance;
           editorRef.current = instance;
+          if (lastPropMarkdownRef.current !== initialMarkdown) {
+            isSyncingExternalRef.current = true;
+            try {
+              instance.action(replaceAll(lastPropMarkdownRef.current, true));
+            } finally {
+              isSyncingExternalRef.current = false;
+            }
+          }
+          lastSerializedMarkdownRef.current = instance.action(getMarkdown());
           return undefined;
         })
         .catch(() => {
@@ -379,22 +426,28 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
     }, [openLinkBubbleAtSelection, updateTableToolbarFromEditor]);
 
     useEffect(() => {
+      const prevProp = lastPropMarkdownRef.current;
+      lastPropMarkdownRef.current = markdown;
+
       const editor = editorRef.current;
       if (!editor || editor.status !== EditorStatus.Created) {
-        lastKnownMarkdownRef.current = markdown;
         return;
       }
-      if (markdown === lastKnownMarkdownRef.current) {
+      if (
+        markdown === prevProp ||
+        markdown === lastSerializedMarkdownRef.current
+      ) {
         return;
       }
 
       isSyncingExternalRef.current = true;
-      lastKnownMarkdownRef.current = markdown;
       try {
         editor.action(replaceAll(markdown, true));
+        lastSerializedMarkdownRef.current = editor.action(getMarkdown());
       } finally {
         isSyncingExternalRef.current = false;
       }
+      linkTargetRangeRef.current = null;
       setTableToolbar((prev) =>
         prev.visible ? { ...prev, visible: false } : prev,
       );
@@ -402,6 +455,43 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
         prev.visible ? { ...prev, visible: false } : prev,
       );
     }, [markdown]);
+
+    useEffect(() => {
+      if (isFirstDocumentDirRenderRef.current) {
+        isFirstDocumentDirRenderRef.current = false;
+        return;
+      }
+      documentDirRef.current = documentDir;
+      for (const refresh of documentDirRefreshCallbacksRef.current) {
+        refresh();
+      }
+    }, [documentDir]);
+
+    useEffect(() => {
+      if (!linkBubble.visible) {
+        return;
+      }
+      const handleDocumentMouseDown = (event: MouseEvent) => {
+        const target = event.target;
+        if (!(target instanceof Element)) {
+          return;
+        }
+        if (target.closest('.elmark-link-bubble')) {
+          return;
+        }
+        if (target.closest('.ProseMirror a')) {
+          return;
+        }
+        linkTargetRangeRef.current = null;
+        setLinkBubble((prev) =>
+          prev.visible ? { ...prev, visible: false } : prev,
+        );
+      };
+      document.addEventListener('mousedown', handleDocumentMouseDown);
+      return () => {
+        document.removeEventListener('mousedown', handleDocumentMouseDown);
+      };
+    }, [linkBubble.visible]);
 
     useEffect(() => {
       const scrollEl = scrollContainerRef.current;
@@ -517,7 +607,7 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
         getMarkdown: () => {
           const editor = editorRef.current;
           if (!editor || editor.status !== EditorStatus.Created) {
-            return lastKnownMarkdownRef.current;
+            return lastPropMarkdownRef.current;
           }
           return editor.action(getMarkdown());
         },
@@ -641,9 +731,10 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
               onOpenExternalUrlRef.current(href);
             }
           }}
-          onClose={() =>
-            setLinkBubble((prev) => ({ ...prev, visible: false }))
-          }
+          onClose={() => {
+            linkTargetRangeRef.current = null;
+            setLinkBubble((prev) => ({ ...prev, visible: false }));
+          }}
         />
 
         <div ref={scrollContainerRef} className="elmark-editor-scroll">

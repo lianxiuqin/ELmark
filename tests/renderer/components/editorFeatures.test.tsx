@@ -154,7 +154,16 @@ describe('WysiwygEditor integration', () => {
     // Syntax highlighting decoration applied inside standard code block
     expect(container.querySelector('.elmark-code-block .hljs-keyword')).not.toBeNull();
 
-    // Ctrl+Click opens external link; plain click shows LinkBubble
+    // Standard code block language input is hidden by default and reveals on hover/focus
+    const codeBlockEl = container.querySelector('.elmark-code-block') as HTMLElement;
+    const langInput = codeBlockEl.querySelector('input[aria-label="代码块语言"]') as HTMLInputElement;
+    expect(langInput.style.opacity).toBe('0');
+    fireEvent.mouseEnter(codeBlockEl);
+    expect(langInput.style.opacity).toBe('1');
+    fireEvent.mouseLeave(codeBlockEl);
+    expect(langInput.style.opacity).toBe('0');
+
+    // Ctrl+Click opens external link; plain click shows LinkBubble; clicking outside closes it
     const anchor = container.querySelector('.ProseMirror a') as HTMLAnchorElement | null;
     expect(anchor).not.toBeNull();
     fireEvent.click(anchor!, { ctrlKey: true });
@@ -163,14 +172,24 @@ describe('WysiwygEditor integration', () => {
     fireEvent.click(anchor!);
     expect(screen.getByDisplayValue('https://example.com/docs')).toBeTruthy();
 
+    fireEvent.mouseDown(document.body);
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    // Ctrl+K at the very end of the document does not throw RangeError
+    const proseMirror = container.querySelector('.ProseMirror') as HTMLElement;
+    fireEvent.keyDown(proseMirror, { key: 'k', ctrlKey: true });
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    fireEvent.keyDown(screen.getByLabelText('链接地址'), { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+
     expect(ref.current?.getMarkdown()).toContain('# Title');
     expect(onChange).not.toHaveBeenCalled();
 
-    // External markdown update should sync without triggering onChange
+    // External CRLF/normalized markdown update should sync without triggering onChange after debounce
     rerender(
       <WysiwygEditor
         ref={ref}
-        markdown="# Updated Heading"
+        markdown={'# Updated Heading\r\n\r\n* item one\r\n* item two\r\n'}
         documentDir="E:\\notes"
         onChange={onChange}
         onOpenExternalUrl={onOpenExternalUrl}
@@ -179,10 +198,106 @@ describe('WysiwygEditor integration', () => {
     await waitFor(() => {
       expect(ref.current?.getMarkdown()).toContain('# Updated Heading');
     });
+    await new Promise((resolve) => setTimeout(resolve, 300));
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it('supports Mermaid dual-state NodeView (error fallback, click-to-edit, Escape-to-collapse)', async () => {
+  it('handles async mount race when markdown prop changes before editor.create() resolves', async () => {
+    const onChange = vi.fn();
+    const onOpenExternalUrl = vi.fn();
+    const ref = createRef<WysiwygEditorHandle>();
+
+    const { container, rerender } = render(
+      <WysiwygEditor
+        ref={ref}
+        markdown="# Initial Stale"
+        documentDir={null}
+        onChange={onChange}
+        onOpenExternalUrl={onOpenExternalUrl}
+      />,
+    );
+
+    // Immediately update markdown before async Milkdown creation settles
+    rerender(
+      <WysiwygEditor
+        ref={ref}
+        markdown="# Latest After Race"
+        documentDir={null}
+        onChange={onChange}
+        onOpenExternalUrl={onOpenExternalUrl}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(container.querySelector('.ProseMirror')?.textContent).toContain(
+        'Latest After Race',
+      );
+    });
+    await new Promise((resolve) => setTimeout(resolve, 260));
+    expect(ref.current?.getMarkdown()).toContain('Latest After Race');
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('keeps inline HTML inline while rendering block HTML as block, and refreshes images when documentDir changes', async () => {
+    const onChange = vi.fn();
+    const onOpenExternalUrl = vi.fn();
+    const md = [
+      'Press <kbd>Ctrl</kbd> now.',
+      '',
+      '<details><summary>Open</summary><img src="./sub/pic.png" alt="sub"></details>',
+      '',
+      '![hero](./hero.png)',
+    ].join('\n');
+
+    const { container, rerender } = render(
+      <WysiwygEditor
+        markdown={md}
+        documentDir={null}
+        onChange={onChange}
+        onOpenExternalUrl={onOpenExternalUrl}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(container.querySelector('.ProseMirror')).not.toBeNull();
+    });
+
+    const htmlBlocks = Array.from(
+      container.querySelectorAll('.elmark-html-block'),
+    ) as HTMLElement[];
+    const inlineHtml = htmlBlocks.find((el) => el.innerHTML.includes('<kbd>'));
+    const blockHtml = htmlBlocks.find((el) => el.innerHTML.includes('<details'));
+    expect(inlineHtml?.style.display).toBe('inline');
+    expect(blockHtml?.style.display).toBe('block');
+
+    const mdImg = container.querySelector(
+      '.ProseMirror img:not(.ProseMirror-separator):not([alt="sub"])',
+    ) as HTMLImageElement | null;
+    expect(mdImg?.getAttribute('src')).toBeNull();
+
+    // Update documentDir without changing markdown
+    rerender(
+      <WysiwygEditor
+        markdown={md}
+        documentDir="D:\\docs"
+        onChange={onChange}
+        onOpenExternalUrl={onOpenExternalUrl}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(mdImg?.getAttribute('src')).toBe(
+        `elmark-local://asset?path=${encodeURIComponent('D:\\docs\\hero.png')}`,
+      );
+    });
+    const htmlImg = blockHtml?.querySelector('img') as HTMLImageElement | null;
+    expect(htmlImg?.getAttribute('src')).toBe(
+      `elmark-local://asset?path=${encodeURIComponent('D:\\docs\\sub\\pic.png')}`,
+    );
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('supports Mermaid dual-state NodeView (error fallback, click-to-edit, internal click stability, Escape-to-collapse)', async () => {
     const onChange = vi.fn();
     const onOpenExternalUrl = vi.fn();
     const md = ['```mermaid', 'graph TD', ' A ---> ???', '```'].join('\n');
@@ -203,11 +318,17 @@ describe('WysiwygEditor integration', () => {
       expect((errEl?.textContent ?? '').length).toBeGreaterThan(0);
     });
 
+    const mermaidBox = container.querySelector('.elmark-mermaid') as HTMLElement;
     const errBanner = container.querySelector('.elmark-mermaid-error') as HTMLElement;
     const textarea = container.querySelector('.elmark-mermaid-source') as HTMLTextAreaElement;
     expect(textarea.style.display).toBe('none');
 
     fireEvent.click(errBanner);
+    expect(textarea.style.display).toBe('block');
+
+    // Internal focus movement inside .elmark-mermaid should not collapse edit mode
+    const langInput = mermaidBox.querySelector('input[aria-label="代码块语言"]') as HTMLInputElement;
+    fireEvent.focusOut(textarea, { relatedTarget: langInput });
     expect(textarea.style.display).toBe('block');
 
     fireEvent.keyDown(textarea, { key: 'Escape' });
