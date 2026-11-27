@@ -79,9 +79,13 @@ export function App() {
 
   const loadFolderTree = useCallback(
     async (dirPath: string) => {
-      const nodes = await api.readFolderTree(dirPath);
-      setFolderName(getPathBaseName(dirPath));
-      setTree(nodes);
+      try {
+        const nodes = await api.readFolderTree(dirPath);
+        setFolderName(getPathBaseName(dirPath));
+        setTree(nodes);
+      } catch {
+        // Ignore unavailable directory when loading initial file's parent tree.
+      }
     },
     [api],
   );
@@ -160,19 +164,24 @@ export function App() {
   // Load initial file passed via CLI / file association on mount.
   useEffect(() => {
     let cancelled = false;
-    void api.getInitialFile().then(async (initialPath) => {
-      if (cancelled || !initialPath) {
-        return;
+    void (async () => {
+      try {
+        const initialPath = await api.getInitialFile();
+        if (cancelled || !initialPath) {
+          return;
+        }
+        const opened = await openFilePath(initialPath);
+        if (!opened || cancelled) {
+          return;
+        }
+        const parentDir = getPathDirName(initialPath);
+        if (parentDir) {
+          await loadFolderTree(parentDir);
+        }
+      } catch {
+        // Leave clean untitled document if initial file startup fails.
       }
-      const opened = await openFilePath(initialPath);
-      if (!opened || cancelled) {
-        return;
-      }
-      const parentDir = getPathDirName(initialPath);
-      if (parentDir) {
-        await loadFolderTree(parentDir);
-      }
-    });
+    })();
     return () => {
       cancelled = true;
     };
@@ -369,15 +378,15 @@ export function App() {
     if (!files || files.length === 0) {
       return;
     }
+    event.preventDefault();
 
     for (let i = 0; i < files.length; i += 1) {
       const file = files[i];
       if (!isMarkdownFilename(file.name)) {
         continue;
       }
-      event.preventDefault();
       const droppedPath =
-        api.getPathForFile?.(file) ?? (file as File & { path?: string }).path;
+        api.getPathForFile?.(file) || (file as File & { path?: string }).path;
       if (droppedPath) {
         void doc.openFilePath(droppedPath);
       }

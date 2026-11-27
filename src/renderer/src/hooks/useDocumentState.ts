@@ -195,9 +195,13 @@ export function useDocumentState(api: ElmarkApi): DocumentStateHook {
       if (!allowed) {
         return false;
       }
-      const opened = await api.readFile(targetPath);
-      applyOpenedFile(opened);
-      return true;
+      try {
+        const opened = await api.readFile(targetPath);
+        applyOpenedFile(opened);
+        return true;
+      } catch {
+        return false;
+      }
     },
     [api, applyOpenedFile, confirmDiscardIfDirty],
   );
@@ -207,12 +211,16 @@ export function useDocumentState(api: ElmarkApi): DocumentStateHook {
     if (!allowed) {
       return false;
     }
-    const opened = await api.openFileDialog();
-    if (!opened) {
+    try {
+      const opened = await api.openFileDialog();
+      if (!opened) {
+        return false;
+      }
+      applyOpenedFile(opened);
+      return true;
+    } catch {
       return false;
     }
-    applyOpenedFile(opened);
-    return true;
   }, [api, applyOpenedFile, confirmDiscardIfDirty]);
 
   const openNew = useCallback(async (): Promise<boolean> => {
@@ -300,9 +308,15 @@ export function useDocumentState(api: ElmarkApi): DocumentStateHook {
     if (!currentPath) {
       return;
     }
-    const opened = await api.readFile(currentPath);
-    applyOpenedFile(opened);
-  }, [api, applyOpenedFile]);
+    try {
+      const opened = await api.readFile(currentPath);
+      applyOpenedFile(opened);
+    } catch {
+      commitState((prev) =>
+        prev.externalChangePending ? { ...prev, externalChangePending: false } : prev,
+      );
+    }
+  }, [api, applyOpenedFile, commitState]);
 
   const ignoreExternalChange = useCallback(() => {
     commitState((prev) =>

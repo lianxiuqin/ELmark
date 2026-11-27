@@ -156,6 +156,33 @@ describe('useDocumentState (Review Focus #4 & #5)', () => {
     expect(result.current.externalChangePending).toBe(false);
     expect(result.current.isDirty).toBe(false);
   });
+
+  it('handles readFile rejections gracefully in openFilePath and reloadFromDisk', async () => {
+    const api = createMockApi();
+    const { result } = renderHook(() => useDocumentState(api));
+
+    await act(async () => {
+      const ok = await result.current.openFilePath('E:\\docs\\a.md');
+      expect(ok).toBe(true);
+    });
+
+    (api.readFile as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('ENOENT'));
+    await act(async () => {
+      const ok = await result.current.openFilePath('E:\\docs\\missing.md');
+      expect(ok).toBe(false);
+    });
+    expect(result.current.filePath).toBe('E:\\docs\\a.md');
+
+    act(() => { result.current.markExternalChange(); });
+    expect(result.current.externalChangePending).toBe(true);
+
+    (api.readFile as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('EACCES'));
+    await act(async () => {
+      await expect(result.current.reloadFromDisk()).resolves.toBeUndefined();
+    });
+    expect(result.current.externalChangePending).toBe(false);
+    expect(result.current.filePath).toBe('E:\\docs\\a.md');
+  });
 });
 
 describe('SourceEditor', () => {
@@ -247,8 +274,21 @@ describe('App integration', () => {
     });
     expect(screen.getByText('1 / 2')).toBeTruthy();
 
-    // Drag and drop a .md file
+    // Drag and drop a non-Markdown file -> prevents default navigation and ignores readFile
     const appShell = document.querySelector('.elmark-app')!;
+    const readCallsBeforeNonMdDrop = (api.readFile as ReturnType<typeof vi.fn>).mock.calls.length;
+    const textFile = new File(['hello'], 'notes.txt', { type: 'text/plain' });
+    const nonMdDropEvent = new Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(nonMdDropEvent, 'dataTransfer', {
+      value: { files: [textFile], types: ['Files'] },
+    });
+    appShell.dispatchEvent(nonMdDropEvent);
+    expect(nonMdDropEvent.defaultPrevented).toBe(true);
+    expect((api.readFile as ReturnType<typeof vi.fn>).mock.calls.length).toBe(
+      readCallsBeforeNonMdDrop,
+    );
+
+    // Drag and drop a .md file
     const droppedFile = new File(['# Dropped'], 'dropped.md', { type: 'text/markdown' });
     fireEvent.drop(appShell, {
       dataTransfer: {

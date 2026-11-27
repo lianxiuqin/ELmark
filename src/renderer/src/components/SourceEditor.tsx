@@ -1,5 +1,6 @@
 import {
   forwardRef,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useRef,
@@ -51,16 +52,32 @@ export const SourceEditor = forwardRef<SourceEditorHandle, SourceEditorProps>(
     const lastQueryRef = useRef('');
     const lastMatchIdxRef = useRef(-1);
 
-    useEffect(() => {
+    const resizeTextarea = useCallback(() => {
       const el = textareaRef.current;
       if (!el || el.scrollHeight <= 0) {
         return;
       }
+      const scrollEl = scrollContainerRef.current;
+      const prevScrollTop = scrollEl?.scrollTop ?? 0;
       el.style.height = 'auto';
       if (el.scrollHeight > 0) {
         el.style.height = `${el.scrollHeight}px`;
       }
-    }, [value]);
+      if (scrollEl) {
+        scrollEl.scrollTop = prevScrollTop;
+      }
+    }, []);
+
+    useEffect(() => {
+      resizeTextarea();
+    }, [resizeTextarea, value]);
+
+    useEffect(() => {
+      window.addEventListener('resize', resizeTextarea);
+      return () => {
+        window.removeEventListener('resize', resizeTextarea);
+      };
+    }, [resizeTextarea]);
 
     useImperativeHandle(
       ref,
