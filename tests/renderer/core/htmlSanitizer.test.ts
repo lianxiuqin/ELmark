@@ -60,7 +60,14 @@ describe('sanitizeReadingHtml (Review Focus #2)', () => {
     expect(isHtmlCommentOnly('<!-- todo: check later -->')).toBe(true);
     expect(isHtmlCommentOnly('  <!-- a -->\n<!-- b -->  ')).toBe(true);
     expect(isHtmlCommentOnly('<!-- c --><p>hi</p>')).toBe(false);
+    expect(isHtmlCommentOnly('<!-- a --> text <!-- b -->')).toBe(false);
+    expect(isHtmlCommentOnly('<!-- unclosed')).toBe(false);
     expect(isHtmlCommentOnly('')).toBe(false);
     expect(isHtmlCommentOnly('   \n  ')).toBe(false);
+
+    const start = performance.now();
+    expect(isHtmlCommentOnly(`${'<!-- -->'.repeat(50)}text`)).toBe(false);
+    expect(isHtmlCommentOnly(`${'<!-- -->'.repeat(50)}<!--`)).toBe(false);
+    expect(performance.now() - start).toBeLessThan(50);
   });
 });

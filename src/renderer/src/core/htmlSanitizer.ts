@@ -56,14 +56,34 @@ const SAFE_HREF_REGEXP =
   /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|matrix):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i;
 
 const ATTR_WHITESPACE_RE = /[\u0000-\u0020\u00A0\u1680\u180E\u2000-\u2029\u205F\u3000]/g;
-const HTML_COMMENTS_ONLY_RE = /^\s*(?:<!--[\s\S]*?-->\s*)+$/;
 
 /**
  * Returns true when `rawHtml` consists solely of one or more HTML comments
  * (with optional surrounding/intervening whitespace).
  */
 export function isHtmlCommentOnly(rawHtml: string): boolean {
-  return HTML_COMMENTS_ONLY_RE.test(rawHtml);
+  let index = 0;
+  let commentCount = 0;
+
+  while (index < rawHtml.length) {
+    while (index < rawHtml.length && /\s/.test(rawHtml[index])) {
+      index += 1;
+    }
+    if (index >= rawHtml.length) {
+      break;
+    }
+    if (!rawHtml.startsWith('<!--', index)) {
+      return false;
+    }
+    const closeIndex = rawHtml.indexOf('-->', index + 4);
+    if (closeIndex === -1) {
+      return false;
+    }
+    commentCount += 1;
+    index = closeIndex + 3;
+  }
+
+  return commentCount > 0;
 }
 
 /**
