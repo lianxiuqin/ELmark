@@ -21,6 +21,10 @@ interface InternalDocumentState {
   externalChangePending: boolean;
 }
 
+export interface DocumentStateOptions {
+  getLiveWysiwygMarkdown?: () => string | null;
+}
+
 export interface DocumentStateHook {
   filePath: string | null;
   fileName: string;
@@ -35,8 +39,10 @@ export interface DocumentStateHook {
   openFileDialog: () => Promise<boolean>;
   openNew: () => Promise<boolean>;
   updateBody: (nextBody: string) => void;
+  markDirty: () => void;
   updateFromSource: (nextRaw: string) => void;
   getFullRawMarkdown: () => string;
+  confirmDiscardIfDirty: () => Promise<boolean>;
   saveFile: () => Promise<boolean>;
   saveFileAs: () => Promise<boolean>;
   toggleMode: () => void;
@@ -53,12 +59,19 @@ function getBaseName(targetPath: string): string {
   return parts[parts.length - 1] || DEFAULT_UNTITLED_NAME;
 }
 
-function getDirName(targetPath: string): string | null {
+export function getDirName(targetPath: string): string | null {
   const lastSep = Math.max(targetPath.lastIndexOf('/'), targetPath.lastIndexOf('\\'));
-  if (lastSep <= 0) {
+  if (lastSep < 0) {
     return null;
   }
-  return targetPath.slice(0, lastSep);
+  if (lastSep === 0) {
+    return targetPath.slice(0, 1);
+  }
+  const prefix = targetPath.slice(0, lastSep);
+  if (/^[A-Za-z]:$/.test(prefix)) {
+    return `${prefix}${targetPath[lastSep]}`;
+  }
+  return prefix;
 }
 
 function createInitialState(): InternalDocumentState {
@@ -80,10 +93,16 @@ function createInitialState(): InternalDocumentState {
  * Manages the active Markdown document lifecycle, frontmatter round-tripping, dirty guards,
  * mode switching, and external file change reconciliation.
  */
-export function useDocumentState(api: ElmarkApi): DocumentStateHook {
+export function useDocumentState(
+  api: ElmarkApi,
+  options?: DocumentStateOptions,
+): DocumentStateHook {
   const [state, setState] = useState<InternalDocumentState>(createInitialState);
   const stateRef = useRef<InternalDocumentState>(state);
   stateRef.current = state;
+
+  const getLiveWysiwygMarkdownRef = useRef(options?.getLiveWysiwygMarkdown);
+  getLiveWysiwygMarkdownRef.current = options?.getLiveWysiwygMarkdown;
 
   const commitState = useCallback(
     (updater: (prev: InternalDocumentState) => InternalDocumentState) => {
@@ -96,6 +115,25 @@ export function useDocumentState(api: ElmarkApi): DocumentStateHook {
     [],
   );
 
+  const flushLiveWysiwygBody = useCallback((): InternalDocumentState => {
+    const current = stateRef.current;
+    if (current.mode !== 'wysiwyg' || !current.isDirty) {
+      return current;
+    }
+    const liveBody = getLiveWysiwygMarkdownRef.current?.();
+    if (typeof liveBody !== 'string' || liveBody === current.body) {
+      return current;
+    }
+    const next: InternalDocumentState = {
+      ...current,
+      body: liveBody,
+      isDirty: true,
+    };
+    stateRef.current = next;
+    setState(next);
+    return next;
+  }, []);
+
   const getFullRawMarkdown = useCallback((): string => {
     const current = stateRef.current;
     if (current.mode === 'source') {
@@ -105,13 +143,18 @@ export function useDocumentState(api: ElmarkApi): DocumentStateHook {
   }, []);
 
   const saveFileAs = useCallback(async (): Promise<boolean> => {
-    const current = stateRef.current;
+    const current = flushLiveWysiwygBody();
     const raw =
       current.mode === 'source'
         ? current.sourceRaw
         : joinFrontmatter(current.frontmatter, current.body, current.lineEnding);
 
-    const savedPath = await api.saveFileAs(raw, current.fileName);
+    let savedPath: string | null = null;
+    try {
+      savedPath = await api.saveFileAs(raw, current.fileName);
+    } catch {
+      return false;
+    }
     if (!savedPath) {
       return false;
     }
@@ -126,12 +169,13 @@ export function useDocumentState(api: ElmarkApi): DocumentStateHook {
       isDirty: false,
       externalChangePending: false,
     }));
+    api.setWindowDirty?.(false);
     api.watchFile(savedPath);
     return true;
-  }, [api, commitState]);
+  }, [api, commitState, flushLiveWysiwygBody]);
 
   const saveFile = useCallback(async (): Promise<boolean> => {
-    const current = stateRef.current;
+    const current = flushLiveWysiwygBody();
     if (!current.filePath) {
       return saveFileAs();
     }
@@ -141,7 +185,12 @@ export function useDocumentState(api: ElmarkApi): DocumentStateHook {
         ? current.sourceRaw
         : joinFrontmatter(current.frontmatter, current.body, current.lineEnding);
 
-    const ok = await api.saveFile(current.filePath, raw);
+    let ok = false;
+    try {
+      ok = await api.saveFile(current.filePath, raw);
+    } catch {
+      return false;
+    }
     if (!ok) {
       return false;
     }
@@ -151,15 +200,21 @@ export function useDocumentState(api: ElmarkApi): DocumentStateHook {
       isDirty: false,
       externalChangePending: false,
     }));
+    api.setWindowDirty?.(false);
     return true;
-  }, [api, commitState, saveFileAs]);
+  }, [api, commitState, flushLiveWysiwygBody, saveFileAs]);
 
   const confirmDiscardIfDirty = useCallback(async (): Promise<boolean> => {
-    const current = stateRef.current;
+    const current = flushLiveWysiwygBody();
     if (!current.isDirty) {
       return true;
     }
-    const choice = await api.confirmDiscard(current.fileName);
+    let choice: 'save' | 'discard' | 'cancel';
+    try {
+      choice = await api.confirmDiscard(current.fileName);
+    } catch {
+      return false;
+    }
     if (choice === 'cancel') {
       return false;
     }
@@ -167,7 +222,7 @@ export function useDocumentState(api: ElmarkApi): DocumentStateHook {
       return true;
     }
     return saveFile();
-  }, [api, saveFile]);
+  }, [api, flushLiveWysiwygBody, saveFile]);
 
   const applyOpenedFile = useCallback(
     (opened: OpenedFile) => {
@@ -184,6 +239,7 @@ export function useDocumentState(api: ElmarkApi): DocumentStateHook {
         isDirty: false,
         externalChangePending: false,
       }));
+      api.setWindowDirty?.(false);
       api.watchFile(opened.filePath);
     },
     [api, commitState],
@@ -233,11 +289,22 @@ export function useDocumentState(api: ElmarkApi): DocumentStateHook {
       ...createInitialState(),
       mode: prev.mode,
     }));
+    api.setWindowDirty?.(false);
     return true;
   }, [api, commitState, confirmDiscardIfDirty]);
 
+  const markDirty = useCallback(() => {
+    if (!stateRef.current.isDirty) {
+      api.setWindowDirty?.(true);
+    }
+    commitState((prev) => (prev.isDirty ? prev : { ...prev, isDirty: true }));
+  }, [api, commitState]);
+
   const updateBody = useCallback(
     (nextBody: string) => {
+      if (stateRef.current.body !== nextBody && !stateRef.current.isDirty) {
+        api.setWindowDirty?.(true);
+      }
       commitState((prev) => {
         if (prev.body === nextBody) {
           return prev;
@@ -249,11 +316,14 @@ export function useDocumentState(api: ElmarkApi): DocumentStateHook {
         };
       });
     },
-    [commitState],
+    [api, commitState],
   );
 
   const updateFromSource = useCallback(
     (nextRaw: string) => {
+      if (stateRef.current.sourceRaw !== nextRaw && !stateRef.current.isDirty) {
+        api.setWindowDirty?.(true);
+      }
       commitState((prev) => {
         if (prev.sourceRaw === nextRaw) {
           return prev;
@@ -265,11 +335,14 @@ export function useDocumentState(api: ElmarkApi): DocumentStateHook {
         };
       });
     },
-    [commitState],
+    [api, commitState],
   );
 
   const setMode = useCallback(
     (nextMode: EditorMode) => {
+      if (nextMode === 'source') {
+        flushLiveWysiwygBody();
+      }
       commitState((prev) => {
         if (prev.mode === nextMode) {
           return prev;
@@ -296,7 +369,7 @@ export function useDocumentState(api: ElmarkApi): DocumentStateHook {
         };
       });
     },
-    [commitState],
+    [commitState, flushLiveWysiwygBody],
   );
 
   const toggleMode = useCallback(() => {
@@ -344,8 +417,10 @@ export function useDocumentState(api: ElmarkApi): DocumentStateHook {
     openFileDialog,
     openNew,
     updateBody,
+    markDirty,
     updateFromSource,
     getFullRawMarkdown,
+    confirmDiscardIfDirty,
     saveFile,
     saveFileAs,
     toggleMode,

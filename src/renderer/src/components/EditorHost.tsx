@@ -3,6 +3,7 @@ import {
   useEffect,
   useImperativeHandle,
   useRef,
+  type ReactNode,
 } from 'react';
 import type { FindResult } from '../../../shared/ipc';
 import { SourceEditor, type SourceEditorHandle } from './SourceEditor';
@@ -13,6 +14,7 @@ export interface EditorHostHandle {
   insertMermaid: () => void;
   scrollToHeadingIndex: (index: number) => void;
   findInSource: (query: string, forward?: boolean, findNext?: boolean) => FindResult;
+  getMarkdown: () => string;
 }
 
 export interface EditorHostProps {
@@ -21,9 +23,11 @@ export interface EditorHostProps {
   fullRawMarkdown: string;
   documentDir: string | null;
   onBodyChange: (nextBody: string) => void;
+  onDirtyHint?: () => void;
   onSourceChange: (nextRaw: string) => void;
   onActiveHeadingChange: (index: number) => void;
   onOpenExternalUrl: (url: string) => void;
+  headerSlot?: ReactNode;
 }
 
 const EMPTY_FIND_RESULT: FindResult = {
@@ -43,9 +47,11 @@ export const EditorHost = forwardRef<EditorHostHandle, EditorHostProps>(
       fullRawMarkdown,
       documentDir,
       onBodyChange,
+      onDirtyHint,
       onSourceChange,
       onActiveHeadingChange,
       onOpenExternalUrl,
+      headerSlot,
     },
     ref,
   ) {
@@ -55,6 +61,12 @@ export const EditorHost = forwardRef<EditorHostHandle, EditorHostProps>(
 
     const modeRef = useRef(mode);
     modeRef.current = mode;
+
+    const bodyRef = useRef(body);
+    bodyRef.current = body;
+
+    const fullRawMarkdownRef = useRef(fullRawMarkdown);
+    fullRawMarkdownRef.current = fullRawMarkdown;
 
     const prevModeRef = useRef(mode);
     const lastScrollRatioRef = useRef(0);
@@ -124,6 +136,12 @@ export const EditorHost = forwardRef<EditorHostHandle, EditorHostProps>(
           }
           return sourceRef.current.findText(query, forward, findNext);
         },
+        getMarkdown: () => {
+          if (modeRef.current === 'wysiwyg') {
+            return wysiwygRef.current?.getMarkdown() ?? bodyRef.current;
+          }
+          return sourceRef.current?.getValue() ?? fullRawMarkdownRef.current;
+        },
       }),
       [],
     );
@@ -144,8 +162,10 @@ export const EditorHost = forwardRef<EditorHostHandle, EditorHostProps>(
             markdown={body}
             documentDir={documentDir}
             onChange={onBodyChange}
+            onDirtyHint={onDirtyHint}
             onActiveHeadingChange={onActiveHeadingChange}
             onOpenExternalUrl={onOpenExternalUrl}
+            headerSlot={headerSlot}
           />
         ) : (
           <SourceEditor

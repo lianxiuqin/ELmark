@@ -42,6 +42,19 @@ const elmarkApi: ElmarkApi = {
   openExternalUrl: (url: string) => ipcRenderer.invoke(IPC_CHANNELS.OPEN_EXTERNAL_URL, url),
   confirmDiscard: (fileName: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.WINDOW_CONFIRM_DISCARD, fileName),
+  setWindowDirty: (isDirty: boolean) =>
+    ipcRenderer.send(IPC_CHANNELS.WINDOW_SET_DIRTY, isDirty),
+  onCloseRequest: (cb: () => void) => {
+    const listener = (): void => {
+      cb();
+    };
+    ipcRenderer.on(IPC_CHANNELS.WINDOW_CLOSE_REQUEST, listener);
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.WINDOW_CLOSE_REQUEST, listener);
+    };
+  },
+  confirmClose: (allowClose: boolean) =>
+    ipcRenderer.send(IPC_CHANNELS.WINDOW_CLOSE_CONFIRM, allowClose),
   getInitialFile: () => ipcRenderer.invoke(IPC_CHANNELS.APP_GET_INITIAL_FILE),
   newWindow: () => ipcRenderer.send(IPC_CHANNELS.WINDOW_NEW),
   getPathForFile: (file: File) => webUtils.getPathForFile(file),

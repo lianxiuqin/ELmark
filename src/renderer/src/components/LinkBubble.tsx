@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 
 export interface LinkBubbleProps {
   visible: boolean;
@@ -23,10 +23,22 @@ export function LinkBubble({
   onClose,
 }: LinkBubbleProps) {
   const [draftHref, setDraftHref] = useState(href);
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     setDraftHref(href);
   }, [href, visible]);
+
+  useEffect(() => {
+    if (!visible) {
+      return;
+    }
+    const input = inputRef.current;
+    if (input) {
+      input.focus();
+      input.select();
+    }
+  }, [visible]);
 
   if (!visible) {
     return null;
@@ -37,9 +49,10 @@ export function LinkBubble({
     onApply(draftHref.trim());
   };
 
-  const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+  const handleContainerKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key === 'Escape') {
       event.preventDefault();
+      event.stopPropagation();
       onClose();
     }
   };
@@ -50,16 +63,17 @@ export function LinkBubble({
       role="dialog"
       aria-label="链接编辑气泡"
       style={{ top, left }}
+      onKeyDown={handleContainerKeyDown}
     >
       <form
         onSubmit={handleSubmit}
         style={{ display: 'flex', alignItems: 'center', gap: '4px' }}
       >
         <input
+          ref={inputRef}
           type="text"
           value={draftHref}
           onChange={(event) => setDraftHref(event.target.value)}
-          onKeyDown={handleKeyDown}
           placeholder="输入链接地址..."
           aria-label="链接地址"
           style={{

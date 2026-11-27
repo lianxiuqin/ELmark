@@ -1,3 +1,4 @@
+import type { Dirent } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { FileTreeNode, OpenedFile } from '../shared/ipc';
@@ -19,7 +20,12 @@ export function isMarkdownFile(fileName: string): boolean {
 
 export async function scanMarkdownTree(rootDir: string): Promise<FileTreeNode[]> {
   const resolvedRoot = path.resolve(rootDir);
-  const entries = await fs.readdir(resolvedRoot, { withFileTypes: true });
+  let entries: Dirent[];
+  try {
+    entries = await fs.readdir(resolvedRoot, { withFileTypes: true });
+  } catch {
+    return [];
+  }
   const nodes: FileTreeNode[] = [];
 
   for (const entry of entries) {
@@ -29,7 +35,12 @@ export async function scanMarkdownTree(rootDir: string): Promise<FileTreeNode[]>
 
     const fullPath = path.join(resolvedRoot, entry.name);
     if (entry.isDirectory()) {
-      const children = await scanMarkdownTree(fullPath);
+      let children: FileTreeNode[] = [];
+      try {
+        children = await scanMarkdownTree(fullPath);
+      } catch {
+        children = [];
+      }
       if (children.length > 0) {
         nodes.push({
           name: entry.name,

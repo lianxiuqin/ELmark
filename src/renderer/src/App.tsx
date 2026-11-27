@@ -14,20 +14,12 @@ import { FrontmatterBar } from './components/FrontmatterBar';
 import { Sidebar } from './components/Sidebar';
 import { TitleBar } from './components/TitleBar';
 import { extractOutline } from './core/outline';
-import { useDocumentState } from './hooks/useDocumentState';
+import { getDirName, useDocumentState } from './hooks/useDocumentState';
 
 function getPathBaseName(targetPath: string): string {
   const trimmed = targetPath.replace(/[\\/]+$/, '');
   const parts = trimmed.split(/[\\/]/);
   return parts[parts.length - 1] || trimmed;
-}
-
-function getPathDirName(targetPath: string): string | null {
-  const lastSep = Math.max(targetPath.lastIndexOf('/'), targetPath.lastIndexOf('\\'));
-  if (lastSep <= 0) {
-    return null;
-  }
-  return targetPath.slice(0, lastSep);
 }
 
 function isMarkdownFilename(name: string): boolean {
@@ -40,8 +32,11 @@ function isMarkdownFilename(name: string): boolean {
  */
 export function App() {
   const api = window.elmark;
-  const doc = useDocumentState(api);
   const editorHostRef = useRef<EditorHostHandle | null>(null);
+  const doc = useDocumentState(api, {
+    getLiveWysiwygMarkdown: () => editorHostRef.current?.getMarkdown() ?? null,
+  });
+  const loadedInitialFileRef = useRef<string | null>(null);
 
   const [sidebarVisible, setSidebarVisible] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<'files' | 'outline'>('files');
@@ -71,6 +66,7 @@ export function App() {
     openNew,
     saveFile,
     saveFileAs,
+    confirmDiscardIfDirty,
     toggleMode,
     markExternalChange,
   } = doc;
@@ -91,20 +87,28 @@ export function App() {
   );
 
   const handleOpenFolder = useCallback(async () => {
-    const result = await api.openFolderDialog();
-    if (!result) {
-      return;
+    try {
+      const result = await api.openFolderDialog();
+      if (!result) {
+        return;
+      }
+      setFolderName(getPathBaseName(result.dirPath));
+      setTree(result.tree);
+      setSidebarVisible(true);
+      setSidebarTab('files');
+    } catch {
+      // Ignore folder open errors cleanly without unhandled promise rejection.
     }
-    setFolderName(getPathBaseName(result.dirPath));
-    setTree(result.tree);
-    setSidebarVisible(true);
-    setSidebarTab('files');
   }, [api]);
 
   const handleExportPdf = useCallback(async () => {
     const suggested =
       fileNameRef.current.replace(/\.(md|markdown)$/i, '') || 'untitled';
-    await api.exportPdf(suggested);
+    try {
+      await api.exportPdf(suggested);
+    } catch {
+      // Main process displays error dialog; avoid unhandled promise rejection.
+    }
   }, [api]);
 
   const runFind = useCallback(
@@ -167,14 +171,15 @@ export function App() {
     void (async () => {
       try {
         const initialPath = await api.getInitialFile();
-        if (cancelled || !initialPath) {
+        if (cancelled || !initialPath || loadedInitialFileRef.current === initialPath) {
           return;
         }
+        loadedInitialFileRef.current = initialPath;
         const opened = await openFilePath(initialPath);
         if (!opened || cancelled) {
           return;
         }
-        const parentDir = getPathDirName(initialPath);
+        const parentDir = getDirName(initialPath);
         if (parentDir) {
           await loadFolderTree(parentDir);
         }
@@ -185,7 +190,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-    // Run once on initial mount.
+    // Run once on initial mount (safe under React StrictMode double-effect).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -208,22 +213,35 @@ export function App() {
     setActiveHeadingIndex(0);
   }, [doc.filePath]);
 
-  // Sync window title with dirty indicator.
+  // Sync window title and main-process dirty state.
   useEffect(() => {
     document.title = `${doc.fileName}${doc.isDirty ? ' *' : ''} — ELmark`;
-  }, [doc.fileName, doc.isDirty]);
+    api.setWindowDirty?.(doc.isDirty);
+  }, [api, doc.fileName, doc.isDirty]);
 
-  // Guard closing with unsaved changes.
+  // Handle native window close confirmation when dirty (without silent beforeunload lockup).
   useEffect(() => {
-    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
-      if (doc.isDirty) {
-        event.preventDefault();
-        event.returnValue = '';
+    if (!api.onCloseRequest) {
+      return;
+    }
+    let closeInFlight = false;
+    return api.onCloseRequest(() => {
+      if (closeInFlight) {
+        return;
       }
-    };
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [doc.isDirty]);
+      closeInFlight = true;
+      void (async () => {
+        try {
+          const allowed = await confirmDiscardIfDirty();
+          api.confirmClose?.(allowed);
+        } catch {
+          api.confirmClose?.(false);
+        } finally {
+          closeInFlight = false;
+        }
+      })();
+    });
+  }, [api, confirmDiscardIfDirty]);
 
   // Subscribe to native menu actions, external file changes, and Chromium find results.
   useEffect(() => {
@@ -444,14 +462,6 @@ export function App() {
             onClose={closeFindBar}
           />
 
-          {doc.mode === 'wysiwyg' ? (
-            <FrontmatterBar
-              key={doc.filePath ?? 'untitled'}
-              frontmatter={doc.frontmatter}
-              onEditInSource={() => doc.setMode('source')}
-            />
-          ) : null}
-
           <EditorHost
             ref={editorHostRef}
             mode={doc.mode}
@@ -459,9 +469,19 @@ export function App() {
             fullRawMarkdown={doc.getFullRawMarkdown()}
             documentDir={doc.dirPath}
             onBodyChange={doc.updateBody}
+            onDirtyHint={doc.markDirty}
             onSourceChange={doc.updateFromSource}
             onActiveHeadingChange={setActiveHeadingIndex}
             onOpenExternalUrl={(url) => void api.openExternalUrl(url)}
+            headerSlot={
+              doc.mode === 'wysiwyg' ? (
+                <FrontmatterBar
+                  key={doc.filePath ?? 'untitled'}
+                  frontmatter={doc.frontmatter}
+                  onEditInSource={() => doc.setMode('source')}
+                />
+              ) : null
+            }
           />
         </main>
       </div>

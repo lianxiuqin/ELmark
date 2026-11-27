@@ -5,6 +5,7 @@ import {
   useImperativeHandle,
   useRef,
   useState,
+  type ReactNode,
 } from 'react';
 import {
   Editor,
@@ -32,7 +33,6 @@ import {
   addRowAfterCommand,
   gfm,
   insertTableCommand,
-  setAlignCommand,
 } from '@milkdown/kit/preset/gfm';
 import { Selection } from '@milkdown/kit/prose/state';
 import {
@@ -44,10 +44,14 @@ import {
 import { getMarkdown, replaceAll } from '@milkdown/kit/utils';
 import 'highlight.js/styles/github.css';
 import {
+  applyColumnAlignment,
   codeBlockViewPlugin,
   codeHighlightPlugin,
+  createDirtyHintPlugin,
   createHtmlViewPlugin,
   createImageViewPlugin,
+  inlineHtmlPairPlugin,
+  taskListItemViewPlugin,
 } from '../core/milkdownPlugins';
 import { LinkBubble } from './LinkBubble';
 import { TableToolbar } from './TableToolbar';
@@ -65,8 +69,10 @@ export interface WysiwygEditorProps {
   markdown: string;
   documentDir: string | null;
   onChange: (nextMarkdown: string) => void;
+  onDirtyHint?: () => void;
   onActiveHeadingChange?: (index: number) => void;
   onOpenExternalUrl: (url: string) => void;
+  headerSlot?: ReactNode;
 }
 
 interface FloatingPosition {
@@ -87,7 +93,15 @@ const DEFAULT_MERMAID_CODE = 'graph TD\n  A[开始] --> B[结束]';
  */
 export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>(
   function WysiwygEditor(
-    { markdown, documentDir, onChange, onActiveHeadingChange, onOpenExternalUrl },
+    {
+      markdown,
+      documentDir,
+      onChange,
+      onDirtyHint,
+      onActiveHeadingChange,
+      onOpenExternalUrl,
+      headerSlot,
+    },
     ref,
   ) {
     const wrapperRef = useRef<HTMLDivElement | null>(null);
@@ -100,6 +114,9 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
 
     const onChangeRef = useRef(onChange);
     onChangeRef.current = onChange;
+
+    const onDirtyHintRef = useRef(onDirtyHint);
+    onDirtyHintRef.current = onDirtyHint;
 
     const onActiveHeadingChangeRef = useRef(onActiveHeadingChange);
     onActiveHeadingChangeRef.current = onActiveHeadingChange;
@@ -127,6 +144,9 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
       left: 0,
       href: '',
     });
+
+    const linkBubbleVisibleRef = useRef(linkBubble.visible);
+    linkBubbleVisibleRef.current = linkBubble.visible;
 
     const computeRelativePosition = useCallback(
       (targetRect: DOMRect, fallbackTop = 12, fallbackLeft = 12) => {
@@ -179,7 +199,22 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
           return;
         }
 
-        const pos = computeRelativePosition(tableEl.getBoundingClientRect());
+        const tableRect = tableEl.getBoundingClientRect();
+        const scrollEl = scrollContainerRef.current;
+        if (scrollEl) {
+          const scrollRect = scrollEl.getBoundingClientRect();
+          if (
+            scrollRect.height > 0 &&
+            (tableRect.bottom < scrollRect.top || tableRect.top > scrollRect.bottom)
+          ) {
+            setTableToolbar((prev) =>
+              prev.visible ? { ...prev, visible: false } : prev,
+            );
+            return;
+          }
+        }
+
+        const pos = computeRelativePosition(tableRect);
         setTableToolbar({ visible: true, top: pos.top, left: pos.left });
       },
       [computeRelativePosition],
@@ -272,6 +307,7 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
       }
 
       let cancelled = false;
+      let editorReady = false;
       let createdEditor: Editor | null = null;
       const initialMarkdown = lastPropMarkdownRef.current;
 
@@ -290,6 +326,10 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
       const imagePlugin = createImageViewPlugin(
         () => documentDirRef.current,
         registerRefresh,
+      );
+      const dirtyHintPlugin = createDirtyHintPlugin(
+        () => !editorReady || isSyncingExternalRef.current,
+        () => onDirtyHintRef.current?.(),
       );
 
       const dismissLinkBubble = () => {
@@ -387,6 +427,9 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
         .use(listener)
         .use(codeHighlightPlugin)
         .use(codeBlockViewPlugin)
+        .use(taskListItemViewPlugin)
+        .use(inlineHtmlPairPlugin)
+        .use(dirtyHintPlugin)
         .use(htmlPlugin)
         .use(imagePlugin);
 
@@ -407,6 +450,7 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
             }
           }
           lastSerializedMarkdownRef.current = instance.action(getMarkdown());
+          editorReady = true;
           return undefined;
         })
         .catch(() => {
@@ -437,6 +481,12 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
         markdown === prevProp ||
         markdown === lastSerializedMarkdownRef.current
       ) {
+        return;
+      }
+
+      const currentSerialized = editor.action(getMarkdown());
+      if (markdown === currentSerialized) {
+        lastSerializedMarkdownRef.current = currentSerialized;
         return;
       }
 
@@ -500,8 +550,24 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
       }
 
       let rafId: number | null = null;
-      const updateActiveHeading = () => {
+      const handleScrollFrame = () => {
         rafId = null;
+
+        if (linkBubbleVisibleRef.current) {
+          linkTargetRangeRef.current = null;
+          setLinkBubble((prev) =>
+            prev.visible ? { ...prev, visible: false } : prev,
+          );
+        }
+
+        const editor = editorRef.current;
+        if (editor && editor.status === EditorStatus.Created) {
+          const view = editor.ctx.get(editorViewCtx);
+          if (isInTable(view.state)) {
+            updateTableToolbarFromEditor(editor);
+          }
+        }
+
         const proseEl = scrollEl.querySelector('.ProseMirror');
         if (!proseEl) {
           return;
@@ -534,7 +600,7 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
         if (rafId !== null) {
           return;
         }
-        rafId = requestAnimationFrame(updateActiveHeading);
+        rafId = requestAnimationFrame(handleScrollFrame);
       };
 
       scrollEl.addEventListener('scroll', handleScroll, { passive: true });
@@ -544,7 +610,7 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
           cancelAnimationFrame(rafId);
         }
       };
-    }, []);
+    }, [updateTableToolbarFromEditor]);
 
     const runProseCommand = useCallback(
       (fn: (editor: Editor) => void) => {
@@ -714,7 +780,7 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
           onAlign={(align) =>
             runProseCommand((editor) => {
               editor.action((ctx) => {
-                ctx.get(commandsCtx).call(setAlignCommand.key, align);
+                applyColumnAlignment(ctx.get(editorViewCtx), align);
               });
             })
           }
@@ -738,6 +804,7 @@ export const WysiwygEditor = forwardRef<WysiwygEditorHandle, WysiwygEditorProps>
         />
 
         <div ref={scrollContainerRef} className="elmark-editor-scroll">
+          {headerSlot}
           <div ref={editorHostRef} className="elmark-prose" />
         </div>
       </div>

@@ -24,6 +24,37 @@ describe('scanMarkdownTree', () => {
     expect(tree[0].children?.map((n) => n.name)).toEqual(['guide.md']);
     await fs.rm(tmp, { recursive: true, force: true });
   });
+
+  it('skips inaccessible subdirectories (EACCES/EPERM) cleanly without throwing', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'elmark-perm-'));
+    const lockedDir = path.join(tmp, 'locked');
+    const goodDir = path.join(tmp, 'good');
+    await fs.mkdir(lockedDir, { recursive: true });
+    await fs.mkdir(goodDir, { recursive: true });
+    await fs.writeFile(path.join(goodDir, 'ok.md'), '# ok');
+    await fs.writeFile(path.join(tmp, 'top.md'), '# top');
+
+    const origReaddir = fs.readdir.bind(fs);
+    const spy = vi.spyOn(fs, 'readdir').mockImplementation((async (dirPath: any, options?: any) => {
+      if (path.resolve(String(dirPath)) === path.resolve(lockedDir)) {
+        const err = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+        throw err;
+      }
+      return origReaddir(dirPath, options);
+    }) as typeof fs.readdir);
+
+    try {
+      const tree = await scanMarkdownTree(tmp);
+      expect(tree.map((n) => [n.type, n.name])).toEqual([
+        ['directory', 'good'],
+        ['file', 'top.md'],
+      ]);
+      expect(tree[0].children?.map((n) => n.name)).toEqual(['ok.md']);
+    } finally {
+      spy.mockRestore();
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('readMarkdownFile', () => {

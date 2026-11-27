@@ -1,7 +1,13 @@
 // @vitest-environment jsdom
 import { createRef } from 'react';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { Editor, defaultValueCtx, editorViewCtx, rootCtx } from '@milkdown/kit/core';
+import { commonmark } from '@milkdown/kit/preset/commonmark';
+import { gfm } from '@milkdown/kit/preset/gfm';
+import { TextSelection } from '@milkdown/kit/prose/state';
+import { getMarkdown } from '@milkdown/kit/utils';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { applyColumnAlignment } from '../../../src/renderer/src/core/milkdownPlugins';
 import { renderMermaidDiagram } from '../../../src/renderer/src/core/mermaidRenderer';
 import { TableToolbar } from '../../../src/renderer/src/components/TableToolbar';
 import { LinkBubble } from '../../../src/renderer/src/components/LinkBubble';
@@ -75,22 +81,46 @@ describe('TableToolbar & LinkBubble micro-controls', () => {
     expect(onAlign).toHaveBeenNthCalledWith(3, 'right');
   });
 
-  it('edits link URL, opens external link, and applies on submit', () => {
+  it('auto-focuses input when opened, edits link URL, stops Escape propagation, and applies on submit', () => {
     const onApply = vi.fn();
     const onOpenExternal = vi.fn();
     const onClose = vi.fn();
-    render(
-      <LinkBubble
-        visible={true}
-        top={10}
-        left={10}
-        href="https://old.test"
-        onApply={onApply}
-        onOpenExternal={onOpenExternal}
-        onClose={onClose}
-      />,
+    const parentKeyDown = vi.fn();
+    const { rerender } = render(
+      <div onKeyDown={parentKeyDown}>
+        <LinkBubble
+          visible={false}
+          top={10}
+          left={10}
+          href="https://old.test"
+          onApply={onApply}
+          onOpenExternal={onOpenExternal}
+          onClose={onClose}
+        />
+      </div>,
+    );
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    rerender(
+      <div onKeyDown={parentKeyDown}>
+        <LinkBubble
+          visible={true}
+          top={10}
+          left={10}
+          href="https://old.test"
+          onApply={onApply}
+          onOpenExternal={onOpenExternal}
+          onClose={onClose}
+        />
+      </div>,
     );
     const input = screen.getByDisplayValue('https://old.test');
+    expect(document.activeElement).toBe(input);
+
+    fireEvent.keyDown(screen.getByTitle('打开链接'), { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(parentKeyDown).not.toHaveBeenCalled();
+
     fireEvent.change(input, { target: { value: 'https://new.test' } });
     fireEvent.click(screen.getByTitle('打开链接'));
     expect(onOpenExternal).toHaveBeenCalledWith('https://new.test');
@@ -238,11 +268,11 @@ describe('WysiwygEditor integration', () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it('keeps inline HTML inline while rendering block HTML as block, and refreshes images when documentDir changes', async () => {
+  it('styles paired inline HTML (<kbd>/<sub>/<sup>) without empty boxes, hides empty closing tags, keeps inline HTML inline, and refreshes images when documentDir changes', async () => {
     const onChange = vi.fn();
     const onOpenExternalUrl = vi.fn();
     const md = [
-      'Press <kbd>Ctrl</kbd> now.',
+      'Press <kbd>Ctrl</kbd> + H<sub>2</sub>O + x<sup>2</sup> and <span>note</span>.',
       '',
       '<details><summary>Open</summary><img src="./sub/pic.png" alt="sub"></details>',
       '',
@@ -262,10 +292,27 @@ describe('WysiwygEditor integration', () => {
       expect(container.querySelector('.ProseMirror')).not.toBeNull();
     });
 
+    // Inline <kbd>/<sub>/<sup> are decorated directly on the text with no empty <kbd></kbd> box
+    const decoratedKbd = container.querySelector('.ProseMirror .elmark-inline-kbd');
+    expect(decoratedKbd?.textContent).toBe('Ctrl');
+    expect(container.querySelector('.ProseMirror .elmark-inline-sub')?.textContent).toBe('2');
+    expect(container.querySelector('.ProseMirror .elmark-inline-sup')?.textContent).toBe('2');
+    expect(container.querySelector('.ProseMirror .elmark-html-block kbd')).toBeNull();
+
+    // Closing tags and bare inline pair tags are hidden
+    const hiddenHtmlNodes = Array.from(
+      container.querySelectorAll('.elmark-html-hidden'),
+    ) as HTMLElement[];
+    expect(hiddenHtmlNodes.length).toBeGreaterThanOrEqual(6);
+    for (const node of hiddenHtmlNodes) {
+      expect(node.style.display).toBe('none');
+      expect(node.innerHTML).toBe('');
+    }
+
     const htmlBlocks = Array.from(
       container.querySelectorAll('.elmark-html-block'),
     ) as HTMLElement[];
-    const inlineHtml = htmlBlocks.find((el) => el.innerHTML.includes('<kbd>'));
+    const inlineHtml = htmlBlocks.find((el) => el.innerHTML.includes('<span'));
     const blockHtml = htmlBlocks.find((el) => el.innerHTML.includes('<details'));
     expect(inlineHtml?.style.display).toBe('inline');
     expect(blockHtml?.style.display).toBe('block');
@@ -295,6 +342,99 @@ describe('WysiwygEditor integration', () => {
       `elmark-local://asset?path=${encodeURIComponent('D:\\docs\\sub\\pic.png')}`,
     );
     expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('renders interactive GFM task list checkboxes, toggles checked state, and triggers immediate onDirtyHint', async () => {
+    const onChange = vi.fn();
+    const onDirtyHint = vi.fn();
+    const ref = createRef<WysiwygEditorHandle>();
+    const md = ['- [x] Done item', '- [ ] Pending item'].join('\n');
+
+    const { container } = render(
+      <WysiwygEditor
+        ref={ref}
+        markdown={md}
+        documentDir={null}
+        onChange={onChange}
+        onDirtyHint={onDirtyHint}
+        onOpenExternalUrl={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(container.querySelectorAll('.elmark-task-checkbox').length).toBe(2);
+    });
+
+    expect(onDirtyHint).not.toHaveBeenCalled();
+
+    const checkboxes = Array.from(
+      container.querySelectorAll('.elmark-task-checkbox'),
+    ) as HTMLInputElement[];
+    expect(checkboxes[0].checked).toBe(true);
+    expect(checkboxes[1].checked).toBe(false);
+
+    // Toggle second task item on
+    fireEvent.click(checkboxes[1]);
+    expect(onDirtyHint).toHaveBeenCalled();
+    expect(ref.current?.getMarkdown()).toContain('[x] Pending item');
+  });
+
+  it('applies table column alignment from body cells without keepTableAlignPlugin reverting it', async () => {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const md = [
+      '| ColA | ColB |',
+      '| --- | --- |',
+      '| CellA | CellB |',
+    ].join('\n');
+
+    const editor = await Editor.make()
+      .config((ctx) => {
+        ctx.set(rootCtx, host);
+        ctx.set(defaultValueCtx, md);
+      })
+      .use(commonmark)
+      .use(gfm)
+      .create();
+
+    try {
+      const view = editor.ctx.get(editorViewCtx);
+      // Locate the second body cell ("CellB") inside ProseMirror doc
+      let cellBPos = -1;
+      view.state.doc.descendants((node, pos) => {
+        if (node.type.name === 'table_cell' && node.textContent.includes('CellB')) {
+          cellBPos = pos + 2; // inside the paragraph inside table_cell
+          return false;
+        }
+        return true;
+      });
+      expect(cellBPos).toBeGreaterThan(0);
+
+      // Move caret into body cell "CellB"
+      view.dispatch(
+        view.state.tr.setSelection(TextSelection.create(view.state.doc, cellBPos)),
+      );
+      expect(view.state.selection.$from.node(-1).type.name).toBe('table_cell');
+
+      // Apply center alignment from body cell -> header & body both update and survive keepTableAlignPlugin
+      expect(applyColumnAlignment(view, 'center')).toBe(true);
+      expect(view.state.selection.$from.node(-1).type.name).toBe('table_cell');
+      expect(view.state.selection.$from.node(-1).attrs.alignment).toBe('center');
+      expect(editor.action(getMarkdown())).toMatch(/\|[\s-]*:---:[\s-]*\|/);
+
+      // Apply right alignment from body cell
+      expect(applyColumnAlignment(view, 'right')).toBe(true);
+      expect(view.state.selection.$from.node(-1).attrs.alignment).toBe('right');
+      expect(editor.action(getMarkdown())).toMatch(/\|[\s-]*---:[\s-]*\|/);
+
+      // Apply left alignment from body cell
+      expect(applyColumnAlignment(view, 'left')).toBe(true);
+      expect(view.state.selection.$from.node(-1).attrs.alignment).toBe('left');
+      expect(editor.action(getMarkdown())).toMatch(/\|[\s-]*:---[\s-]*\|/);
+    } finally {
+      await editor.destroy();
+      host.remove();
+    }
   });
 
   it('supports Mermaid dual-state NodeView (error fallback, click-to-edit, internal click stability, Escape-to-collapse)', async () => {

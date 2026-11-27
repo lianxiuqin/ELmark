@@ -8,6 +8,7 @@ import {
 import type { FindResult } from '../../../shared/ipc';
 
 export interface SourceEditorHandle {
+  getValue: () => string;
   getScrollRatio: () => number;
   setScrollRatio: (ratio: number) => void;
   findText: (query: string, forward?: boolean, findNext?: boolean) => FindResult;
@@ -82,6 +83,7 @@ export const SourceEditor = forwardRef<SourceEditorHandle, SourceEditorProps>(
     useImperativeHandle(
       ref,
       () => ({
+        getValue: () => textareaRef.current?.value ?? valueRef.current,
         getScrollRatio: () => {
           const el = scrollContainerRef.current;
           if (!el || el.scrollHeight <= el.clientHeight) {

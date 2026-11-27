@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
-import { createRef } from 'react';
+import { createRef, StrictMode } from 'react';
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ElmarkApi, FindResult, MenuAction } from '../../../src/shared/ipc';
 import { SourceEditor, type SourceEditorHandle } from '../../../src/renderer/src/components/SourceEditor';
-import { useDocumentState } from '../../../src/renderer/src/hooks/useDocumentState';
+import { getDirName, useDocumentState } from '../../../src/renderer/src/hooks/useDocumentState';
 
 vi.mock('../../../src/renderer/src/components/WysiwygEditor', async () => {
   const React = await import('react');
@@ -12,23 +12,30 @@ vi.mock('../../../src/renderer/src/components/WysiwygEditor', async () => {
     props: {
       markdown: string;
       onChange: (nextMarkdown: string) => void;
+      onDirtyHint?: () => void;
+      headerSlot?: React.ReactNode;
     },
     ref: React.ForwardedRef<any>,
   ) {
+    const liveMarkdownRef = React.useRef(props.markdown);
+    liveMarkdownRef.current = props.markdown;
     React.useImperativeHandle(ref, () => ({
       insertTable: vi.fn(),
       insertMermaid: vi.fn(),
       scrollToHeadingIndex: vi.fn(),
-      getMarkdown: () => props.markdown,
+      getMarkdown: () => liveMarkdownRef.current,
       getScrollRatio: () => 0,
       setScrollRatio: vi.fn(),
     }));
     return (
-      <div
-        data-testid="mock-wysiwyg"
-        onClick={() => props.onChange(`${props.markdown}\n# Edited`)}
-      >
-        {props.markdown}
+      <div className="elmark-editor-scroll">
+        {props.headerSlot}
+        <div
+          data-testid="mock-wysiwyg"
+          onClick={() => props.onChange(`${props.markdown}\n# Edited`)}
+        >
+          {props.markdown}
+        </div>
       </div>
     );
   });
@@ -55,6 +62,9 @@ function createMockApi(overrides: Partial<ElmarkApi> = {}): ElmarkApi {
     openFolderDialog: vi.fn().mockResolvedValue(null),
     readFolderTree: vi.fn().mockResolvedValue([]),
     confirmDiscard: vi.fn().mockResolvedValue('cancel'),
+    setWindowDirty: vi.fn(),
+    onCloseRequest: vi.fn().mockReturnValue(() => {}),
+    confirmClose: vi.fn(),
     watchFile: vi.fn(),
     stopWatchFile: vi.fn(),
     onExternalFileChange: vi.fn().mockReturnValue(() => {}),
@@ -183,6 +193,93 @@ describe('useDocumentState (Review Focus #4 & #5)', () => {
     expect(result.current.externalChangePending).toBe(false);
     expect(result.current.filePath).toBe('E:\\docs\\a.md');
   });
+
+  it('flushes live WYSIWYG markdown synchronously on saveFile, saveFileAs, and toggleMode right after markDirty', async () => {
+    const api = createMockApi();
+    let liveMd = '# Initial';
+    const { result } = renderHook(() =>
+      useDocumentState(api, { getLiveWysiwygMarkdown: () => liveMd }),
+    );
+
+    await act(async () => {
+      await result.current.openFilePath('E:\\docs\\a.md');
+    });
+
+    // Simulate keystroke before Milkdown's 200ms markdownUpdated debounce fires
+    liveMd = '# Typed 5ms Ago';
+    act(() => {
+      result.current.markDirty();
+    });
+    expect(result.current.isDirty).toBe(true);
+    expect(api.setWindowDirty).toHaveBeenCalledWith(true);
+
+    // Toggle to source mode immediately -> must include flushed live markdown + frontmatter
+    act(() => {
+      result.current.toggleMode();
+    });
+    expect(result.current.mode).toBe('source');
+    expect(result.current.getFullRawMarkdown()).toContain('title: KeepMe');
+    expect(result.current.getFullRawMarkdown()).toContain('# Typed 5ms Ago');
+
+    // Switch back to WYSIWYG, type again, and hit Ctrl+S immediately without waiting for debounce
+    act(() => {
+      result.current.toggleMode();
+    });
+    liveMd = '# Saved Immediately';
+    act(() => {
+      result.current.markDirty();
+    });
+
+    await act(async () => {
+      const ok = await result.current.saveFile();
+      expect(ok).toBe(true);
+    });
+    expect(api.saveFile).toHaveBeenCalledWith(
+      'E:\\docs\\a.md',
+      expect.stringContaining('# Saved Immediately'),
+    );
+    expect(result.current.isDirty).toBe(false);
+    expect(api.setWindowDirty).toHaveBeenLastCalledWith(false);
+  });
+
+  it('preserves isDirty=true when saveFile or saveFileAs returns false/null or throws', async () => {
+    const api = createMockApi({
+      saveFile: vi.fn().mockResolvedValueOnce(false).mockRejectedValueOnce(new Error('EACCES')),
+      saveFileAs: vi.fn().mockRejectedValueOnce(new Error('ENOSPC')),
+    });
+    const { result } = renderHook(() => useDocumentState(api));
+
+    await act(async () => {
+      await result.current.openFilePath('E:\\docs\\a.md');
+    });
+    act(() => {
+      result.current.updateBody('# Unsaved');
+    });
+    expect(result.current.isDirty).toBe(true);
+
+    await act(async () => {
+      expect(await result.current.saveFile()).toBe(false);
+    });
+    expect(result.current.isDirty).toBe(true);
+
+    await act(async () => {
+      expect(await result.current.saveFile()).toBe(false);
+    });
+    expect(result.current.isDirty).toBe(true);
+
+    await act(async () => {
+      expect(await result.current.saveFileAs()).toBe(false);
+    });
+    expect(result.current.isDirty).toBe(true);
+  });
+
+  it('returns drive root with separator from getDirName for root-level files', () => {
+    expect(getDirName('E:\\notes.md')).toBe('E:\\');
+    expect(getDirName('E:/notes.md')).toBe('E:/');
+    expect(getDirName('E:\\docs\\notes.md')).toBe('E:\\docs');
+    expect(getDirName('/notes.md')).toBe('/');
+    expect(getDirName('notes.md')).toBeNull();
+  });
 });
 
 describe('SourceEditor', () => {
@@ -205,9 +302,10 @@ describe('SourceEditor', () => {
 });
 
 describe('App integration', () => {
-  it('loads initial file + parent folder tree, toggles source mode, finds in source, and guards unload', async () => {
+  it('loads initial file + parent folder tree, toggles source mode, finds in source, and coordinates dirty window close', async () => {
     let menuCallback: ((action: MenuAction) => void) | null = null;
     let findCallback: ((res: FindResult) => void) | null = null;
+    let closeRequestCallback: (() => void) | null = null;
 
     const api = createMockApi({
       getInitialFile: vi.fn().mockResolvedValue('E:\\docs\\a.md'),
@@ -222,6 +320,10 @@ describe('App integration', () => {
         findCallback = cb;
         return () => {};
       }),
+      onCloseRequest: vi.fn((cb) => {
+        closeRequestCallback = cb;
+        return () => {};
+      }),
       getPathForFile: vi.fn((file: File) => `E:\\dropped\\${file.name}`),
     });
     window.elmark = api;
@@ -233,6 +335,10 @@ describe('App integration', () => {
     });
     expect(api.readFolderTree).toHaveBeenCalledWith('E:\\docs');
     expect(document.title).toBe('a.md — ELmark');
+
+    // FrontmatterBar is rendered inside the scrollable editor canvas in WYSIWYG mode
+    const scrollHost = document.querySelector('.elmark-editor-scroll');
+    expect(scrollHost?.querySelector('.elmark-frontmatter')).not.toBeNull();
 
     // Toggle sidebar via Ctrl+Shift+L
     fireEvent.keyDown(window, { key: 'L', ctrlKey: true, shiftKey: true });
@@ -250,12 +356,34 @@ describe('App integration', () => {
     fireEvent.change(searchInput, { target: { value: 'KeepMe' } });
     expect(screen.getByText('1 / 1')).toBeTruthy();
 
-    // Edit in source mode -> dirty title + beforeunload preventDefault
+    // Edit in source mode -> dirty title + setWindowDirty(true) + native close confirmation flow
     fireEvent.change(textarea, { target: { value: '---\ntitle: KeepMe\n---\n# Changed' } });
     expect(document.title).toBe('a.md * — ELmark');
-    const unloadEvent = new Event('beforeunload', { cancelable: true });
-    window.dispatchEvent(unloadEvent);
-    expect(unloadEvent.defaultPrevented).toBe(true);
+    expect(api.setWindowDirty).toHaveBeenCalledWith(true);
+
+    // Dirty close: user chooses 'cancel' -> confirmClose(false)
+    (api.confirmDiscard as ReturnType<typeof vi.fn>).mockResolvedValueOnce('cancel');
+    await act(async () => {
+      closeRequestCallback?.();
+    });
+    expect(api.confirmDiscard).toHaveBeenCalledWith('a.md');
+    expect(api.confirmClose).toHaveBeenLastCalledWith(false);
+
+    // Dirty close: user chooses 'save' but save fails -> confirmClose(false) & stays dirty
+    (api.confirmDiscard as ReturnType<typeof vi.fn>).mockResolvedValueOnce('save');
+    (api.saveFile as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
+    await act(async () => {
+      closeRequestCallback?.();
+    });
+    expect(api.confirmClose).toHaveBeenLastCalledWith(false);
+    expect(document.title).toBe('a.md * — ELmark');
+
+    // Dirty close: user chooses 'discard' -> confirmClose(true)
+    (api.confirmDiscard as ReturnType<typeof vi.fn>).mockResolvedValueOnce('discard');
+    await act(async () => {
+      closeRequestCallback?.();
+    });
+    expect(api.confirmClose).toHaveBeenLastCalledWith(true);
 
     // Save via menu action
     await act(async () => {
@@ -299,5 +427,24 @@ describe('App integration', () => {
     await waitFor(() => {
       expect(api.readFile).toHaveBeenCalledWith('E:\\dropped\\dropped.md');
     });
+  });
+
+  it('loads initial CLI file reliably once under React StrictMode without one-shot IPC wipe', async () => {
+    const api = createMockApi({
+      getInitialFile: vi.fn().mockResolvedValue('E:\\docs\\a.md'),
+    });
+    window.elmark = api;
+
+    render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('a.md')).toBeTruthy();
+    });
+    expect(api.readFile).toHaveBeenCalledTimes(1);
+    expect(api.readFile).toHaveBeenCalledWith('E:\\docs\\a.md');
   });
 });

@@ -79,7 +79,10 @@ function extractInitialMarkdownArg(argv: string[]): string | null {
 }
 
 const isSmokeTest = process.argv.includes('--smoke-test');
-let pendingInitialFile: string | null = extractInitialMarkdownArg(process.argv);
+const initialCliFile: string | null = extractInitialMarkdownArg(process.argv);
+const windowInitialFiles = new Map<number, string>();
+const dirtyWindows = new Set<number>();
+const closingWindows = new Set<number>();
 const windowWatchers = new Map<number, DocumentFileWatcher>();
 
 function getWindowStatePath(): string {
@@ -175,7 +178,7 @@ function dispatchMenuAction(win: BrowserWindow | null, action: MenuAction): void
   }
 }
 
-function createMainWindow(): BrowserWindow {
+function createMainWindow(initialFile?: string | null): BrowserWindow {
   const savedState = loadWindowState();
   const win = new BrowserWindow({
     width: savedState.width,
@@ -202,6 +205,9 @@ function createMainWindow(): BrowserWindow {
 
   const webContentsId = win.webContents.id;
   getOrCreateWatcher(webContentsId);
+  if (initialFile) {
+    windowInitialFiles.set(webContentsId, initialFile);
+  }
 
   win.once('ready-to-show', () => {
     if (isSmokeTest) {
@@ -226,7 +232,19 @@ function createMainWindow(): BrowserWindow {
 
   win.on('resize', scheduleSaveState);
   win.on('move', scheduleSaveState);
-  win.on('close', () => {
+  win.on('close', (event) => {
+    if (
+      dirtyWindows.has(webContentsId) &&
+      !win.webContents.isDestroyed() &&
+      !win.webContents.isCrashed()
+    ) {
+      event.preventDefault();
+      if (!closingWindows.has(webContentsId)) {
+        closingWindows.add(webContentsId);
+        win.webContents.send(IPC_CHANNELS.WINDOW_CLOSE_REQUEST);
+      }
+      return;
+    }
     if (saveBoundsTimer !== null) {
       clearTimeout(saveBoundsTimer);
       saveBoundsTimer = null;
@@ -235,6 +253,13 @@ function createMainWindow(): BrowserWindow {
   });
 
   win.on('closed', () => {
+    if (saveBoundsTimer !== null) {
+      clearTimeout(saveBoundsTimer);
+      saveBoundsTimer = null;
+    }
+    dirtyWindows.delete(webContentsId);
+    closingWindows.delete(webContentsId);
+    windowInitialFiles.delete(webContentsId);
     const watcher = windowWatchers.get(webContentsId);
     if (watcher) {
       watcher.stop();
@@ -356,10 +381,16 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle(IPC_CHANNELS.FILE_SAVE, async (event, filePath: string, content: string) => {
-    const watcher = getOrCreateWatcher(event.sender.id);
-    watcher.markSelfWrite(filePath);
-    await writeMarkdownFile(filePath, content);
-    return true;
+    try {
+      const watcher = getOrCreateWatcher(event.sender.id);
+      watcher.markSelfWrite(filePath);
+      await writeMarkdownFile(filePath, content);
+      return true;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      dialog.showErrorBox('保存文件失败', `无法保存“${filePath}”：\n${detail}`);
+      return false;
+    }
   });
 
   ipcMain.handle(
@@ -377,10 +408,16 @@ function registerIpcHandlers(): void {
       if (result.canceled || !result.filePath) {
         return null;
       }
-      const watcher = getOrCreateWatcher(event.sender.id);
-      watcher.markSelfWrite(result.filePath);
-      await writeMarkdownFile(result.filePath, content);
-      return result.filePath;
+      try {
+        const watcher = getOrCreateWatcher(event.sender.id);
+        watcher.markSelfWrite(result.filePath);
+        await writeMarkdownFile(result.filePath, content);
+        return result.filePath;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        dialog.showErrorBox('另存为失败', `无法保存“${result.filePath}”：\n${detail}`);
+        return null;
+      }
     },
   );
 
@@ -458,7 +495,13 @@ function registerIpcHandlers(): void {
     if (!win || win.isDestroyed()) {
       return null;
     }
-    return exportWindowToPdf(win, suggestedBaseName, dialog);
+    try {
+      return await exportWindowToPdf(win, suggestedBaseName, dialog);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      dialog.showErrorBox('导出 PDF 失败', `无法导出 PDF：\n${detail}`);
+      return null;
+    }
   });
 
   ipcMain.handle(IPC_CHANNELS.OPEN_EXTERNAL_URL, async (_event, url: string) => {
@@ -491,10 +534,30 @@ function registerIpcHandlers(): void {
     },
   );
 
-  ipcMain.handle(IPC_CHANNELS.APP_GET_INITIAL_FILE, () => {
-    const initialFile = pendingInitialFile;
-    pendingInitialFile = null;
-    return initialFile;
+  ipcMain.on(IPC_CHANNELS.WINDOW_SET_DIRTY, (event, isDirty: boolean) => {
+    if (isDirty) {
+      dirtyWindows.add(event.sender.id);
+    } else {
+      dirtyWindows.delete(event.sender.id);
+    }
+  });
+
+  ipcMain.on(IPC_CHANNELS.WINDOW_CLOSE_CONFIRM, (event, allowClose: boolean) => {
+    const webContentsId = event.sender.id;
+    closingWindows.delete(webContentsId);
+    if (!allowClose) {
+      return;
+    }
+    dirtyWindows.delete(webContentsId);
+    const win = getWindowFromEvent(event);
+    if (win && !win.isDestroyed()) {
+      saveWindowState(win);
+      win.destroy();
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.APP_GET_INITIAL_FILE, (event) => {
+    return windowInitialFiles.get(event.sender.id) ?? null;
   });
 
   ipcMain.on(IPC_CHANNELS.WINDOW_NEW, () => {
@@ -627,8 +690,8 @@ app.whenReady().then(() => {
   );
   Menu.setApplicationMenu(appMenu);
 
-  const expectInitialDocument = Boolean(pendingInitialFile);
-  const mainWindow = createMainWindow();
+  const expectInitialDocument = Boolean(initialCliFile);
+  const mainWindow = createMainWindow(initialCliFile);
   if (isSmokeTest) {
     attachSmokeTest(mainWindow, expectInitialDocument);
   }

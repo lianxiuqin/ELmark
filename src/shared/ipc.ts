@@ -16,6 +16,9 @@ export const IPC_CHANNELS = {
   EXPORT_PDF: 'export:pdf',
   OPEN_EXTERNAL_URL: 'app:open-external-url',
   WINDOW_CONFIRM_DISCARD: 'window:confirm-discard',
+  WINDOW_SET_DIRTY: 'window:set-dirty',
+  WINDOW_CLOSE_REQUEST: 'window:close-request',
+  WINDOW_CLOSE_CONFIRM: 'window:close-confirm',
   APP_GET_INITIAL_FILE: 'app:get-initial-file',
   WINDOW_NEW: 'window:new',
 } as const;
@@ -81,6 +84,9 @@ export interface ElmarkApi {
   exportPdf(suggestedBaseName: string): Promise<string | null>;
   openExternalUrl(url: string): Promise<void>;
   confirmDiscard(fileName: string): Promise<DiscardChoice>;
+  setWindowDirty(isDirty: boolean): void;
+  onCloseRequest(cb: () => void): () => void;
+  confirmClose(allowClose: boolean): void;
   getInitialFile(): Promise<string | null>;
   newWindow(): void;
   getPathForFile?: (file: File) => string;

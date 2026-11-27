@@ -42,9 +42,7 @@ flowchart LR
 
 <details>
 <summary>Keyboard Shortcut Hint (Click to expand)</summary>
-
-Press <kbd>Ctrl</kbd> + <kbd>S</kbd> to save the active Markdown document.
-
+<p>Press <kbd>Ctrl</kbd> + <kbd>S</kbd> to save the active Markdown document.</p>
 </details>
 
 ```typescript

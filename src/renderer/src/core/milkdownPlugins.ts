@@ -3,9 +3,11 @@ import {
   codeBlockSchema,
   htmlSchema,
   imageSchema,
+  listItemSchema,
 } from '@milkdown/kit/preset/commonmark';
 import type { Node as ProseNode } from '@milkdown/kit/prose/model';
 import { Plugin, PluginKey } from '@milkdown/kit/prose/state';
+import { isInTable, selectedRect } from '@milkdown/kit/prose/tables';
 import type { EditorView, NodeView } from '@milkdown/kit/prose/view';
 import { Decoration, DecorationSet } from '@milkdown/kit/prose/view';
 import { $prose, $view } from '@milkdown/kit/utils';
@@ -16,8 +18,13 @@ import { renderMermaidDiagram } from './mermaidRenderer';
 
 const lowlight = createLowlight(common);
 const CODE_HIGHLIGHT_PLUGIN_KEY = new PluginKey('ELMARK_CODE_HIGHLIGHT');
+const INLINE_HTML_PAIR_PLUGIN_KEY = new PluginKey('ELMARK_INLINE_HTML_PAIR');
+const DIRTY_HINT_PLUGIN_KEY = new PluginKey('ELMARK_DIRTY_HINT');
 const MERMAID_DEBOUNCE_MS = 300;
 const BLOCK_HTML_TAG_RE = /<(?:details|div|p|table|ul|ol|pre|hr|blockquote|section|article|h[1-6])\b/i;
+const BARE_INLINE_OPEN_TAG_RE = /^<(kbd|sub|sup)\s*>$/i;
+const BARE_INLINE_CLOSE_TAG_RE = /^<\/(kbd|sub|sup)\s*>$/i;
+const BARE_INLINE_PAIR_TAG_RE = /^<\/?(?:kbd|sub|sup)\s*>$/i;
 
 interface HastChild {
   type: string;
@@ -299,6 +306,7 @@ function createMermaidCodeBlockView(
   dom.tabIndex = -1;
 
   const header = document.createElement('div');
+  header.className = 'elmark-mermaid-header';
   header.style.display = 'none';
   header.style.alignItems = 'center';
   header.style.justifyContent = 'space-between';
@@ -570,8 +578,8 @@ export function createHtmlViewPlugin(
 
     const syncHtmlDom = (raw: string): void => {
       dom.dataset.value = raw;
-      if (isHtmlCommentOnly(raw)) {
-        dom.className = 'elmark-html-comment';
+      const hideHtmlNode = (className: string): void => {
+        dom.className = className;
         dom.setAttribute('aria-hidden', 'true');
         dom.style.display = 'none';
         dom.style.padding = '';
@@ -579,10 +587,24 @@ export function createHtmlViewPlugin(
         dom.style.border = '';
         dom.style.background = '';
         dom.innerHTML = '';
+      };
+
+      if (isHtmlCommentOnly(raw)) {
+        hideHtmlNode('elmark-html-comment');
+        return;
+      }
+
+      if (BARE_INLINE_PAIR_TAG_RE.test(raw.trim())) {
+        hideHtmlNode('elmark-html-hidden');
         return;
       }
 
       const sanitized = sanitizeReadingHtml(raw, getDocumentDir());
+      if (!sanitized.trim()) {
+        hideHtmlNode('elmark-html-hidden');
+        return;
+      }
+
       const isBlockHtml = BLOCK_HTML_TAG_RE.test(sanitized);
       dom.className = 'elmark-html-block';
       dom.removeAttribute('aria-hidden');
@@ -692,4 +714,274 @@ export function createImageViewPlugin(
       },
     };
   });
+}
+
+function buildInlineHtmlPairDecorations(doc: ProseNode): DecorationSet {
+  const decorations: Decoration[] = [];
+
+  doc.descendants((node, pos) => {
+    if (!node.isTextblock) {
+      return true;
+    }
+
+    const openStack: Array<{ tag: string; start: number }> = [];
+    node.forEach((child, offset) => {
+      if (child.type.name !== 'html') {
+        return;
+      }
+      const raw = String(child.attrs.value ?? '').trim();
+      const childPos = pos + 1 + offset;
+      const openMatch = BARE_INLINE_OPEN_TAG_RE.exec(raw);
+      if (openMatch) {
+        openStack.push({
+          tag: openMatch[1].toLowerCase(),
+          start: childPos + child.nodeSize,
+        });
+        return;
+      }
+
+      const closeMatch = BARE_INLINE_CLOSE_TAG_RE.exec(raw);
+      if (closeMatch) {
+        const tag = closeMatch[1].toLowerCase();
+        for (let i = openStack.length - 1; i >= 0; i -= 1) {
+          if (openStack[i].tag === tag) {
+            const [entry] = openStack.splice(i, 1);
+            if (childPos > entry.start) {
+              decorations.push(
+                Decoration.inline(entry.start, childPos, {
+                  class: `elmark-inline-${tag}`,
+                }),
+              );
+            }
+            break;
+          }
+        }
+      }
+    });
+
+    return false;
+  });
+
+  return DecorationSet.create(doc, decorations);
+}
+
+/**
+ * ProseMirror decoration plugin that styles paired inline HTML tags
+ * (`<kbd>...</kbd>`, `<sub>...</sub>`, `<sup>...</sup>`) cleanly in place.
+ */
+export const inlineHtmlPairPlugin = $prose(() => {
+  return new Plugin({
+    key: INLINE_HTML_PAIR_PLUGIN_KEY,
+    state: {
+      init: (_, state) => buildInlineHtmlPairDecorations(state.doc),
+      apply: (tr, prevSet) =>
+        tr.docChanged ? buildInlineHtmlPairDecorations(tr.doc) : prevSet,
+    },
+    props: {
+      decorations(state) {
+        return INLINE_HTML_PAIR_PLUGIN_KEY.getState(state);
+      },
+    },
+  });
+});
+
+/**
+ * Custom `list_item` NodeView rendering interactive checkboxes for GFM task lists
+ * while keeping standard bullet/ordered list items lightweight.
+ */
+export const taskListItemViewPlugin = $view(
+  listItemSchema.node,
+  () => (initialNode, view, getPos) => {
+    let currentNode = initialNode;
+    const isTask = initialNode.attrs.checked !== null && initialNode.attrs.checked !== undefined;
+
+    const li = document.createElement('li');
+    const syncBaseAttrs = (node: ProseNode): void => {
+      const taskItem = node.attrs.checked !== null && node.attrs.checked !== undefined;
+      li.dataset.itemType = taskItem ? 'task' : String(node.attrs.listType ?? 'bullet');
+      if (node.attrs.label != null) {
+        li.dataset.label = String(node.attrs.label);
+      }
+      if (node.attrs.listType != null) {
+        li.dataset.listType = String(node.attrs.listType);
+      }
+      if (node.attrs.spread != null) {
+        li.dataset.spread = String(node.attrs.spread);
+      }
+      if (taskItem) {
+        li.dataset.checked = String(Boolean(node.attrs.checked));
+      } else {
+        delete li.dataset.checked;
+      }
+    };
+
+    syncBaseAttrs(initialNode);
+
+    if (!isTask) {
+      return {
+        dom: li,
+        contentDOM: li,
+        update(nextNode) {
+          if (nextNode.type !== currentNode.type) {
+            return false;
+          }
+          const nextIsTask =
+            nextNode.attrs.checked !== null && nextNode.attrs.checked !== undefined;
+          if (nextIsTask) {
+            return false;
+          }
+          currentNode = nextNode;
+          syncBaseAttrs(nextNode);
+          return true;
+        },
+      };
+    }
+
+    li.className = 'elmark-task-item';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'elmark-task-checkbox';
+    checkbox.contentEditable = 'false';
+    checkbox.setAttribute('aria-label', '切换任务状态');
+    checkbox.checked = Boolean(initialNode.attrs.checked);
+
+    const content = document.createElement('div');
+    content.className = 'elmark-task-content';
+
+    li.appendChild(checkbox);
+    li.appendChild(content);
+
+    checkbox.addEventListener('mousedown', (event) => {
+      event.stopPropagation();
+    });
+
+    checkbox.addEventListener('change', (event) => {
+      event.stopPropagation();
+      const pos = getPos();
+      if (typeof pos !== 'number') {
+        return;
+      }
+      const latestNode = view.state.doc.nodeAt(pos);
+      if (!latestNode || latestNode.attrs.checked == null) {
+        return;
+      }
+      const nextChecked = checkbox.checked;
+      if (Boolean(latestNode.attrs.checked) === nextChecked) {
+        return;
+      }
+      view.dispatch(
+        view.state.tr.setNodeMarkup(pos, undefined, {
+          ...latestNode.attrs,
+          checked: nextChecked,
+        }),
+      );
+    });
+
+    return {
+      dom: li,
+      contentDOM: content,
+      update(nextNode) {
+        if (nextNode.type !== currentNode.type) {
+          return false;
+        }
+        const nextIsTask =
+          nextNode.attrs.checked !== null && nextNode.attrs.checked !== undefined;
+        if (!nextIsTask) {
+          return false;
+        }
+        currentNode = nextNode;
+        syncBaseAttrs(nextNode);
+        checkbox.checked = Boolean(nextNode.attrs.checked);
+        return true;
+      },
+      stopEvent(event) {
+        return event.target === checkbox;
+      },
+      ignoreMutation(record) {
+        return (
+          record.target === checkbox ||
+          (record.type === 'attributes' && record.target === li)
+        );
+      },
+    };
+  },
+);
+
+/**
+ * Lightweight ProseMirror plugin that notifies immediately (0ms) when a non-sync
+ * document transaction mutates the editor state.
+ */
+export function createDirtyHintPlugin(
+  shouldIgnore: () => boolean,
+  onDirty: () => void,
+): MilkdownPlugin {
+  return $prose(() => {
+    return new Plugin({
+      key: DIRTY_HINT_PLUGIN_KEY,
+      state: {
+        init: () => null,
+        apply(tr) {
+          if (tr.docChanged && !shouldIgnore()) {
+            onDirty();
+          }
+          return null;
+        },
+      },
+    });
+  });
+}
+
+/**
+ * Applies column alignment to the header cell and all body cells in the active
+ * table column(s) in a single transaction so Milkdown GFM's `keepTableAlignPlugin`
+ * preserves the alignment from any cell (header or body).
+ */
+export function applyColumnAlignment(
+  view: EditorView,
+  align: 'left' | 'center' | 'right',
+): boolean {
+  const { state } = view;
+  if (!isInTable(state)) {
+    return false;
+  }
+
+  let rect: ReturnType<typeof selectedRect>;
+  try {
+    rect = selectedRect(state);
+  } catch {
+    return false;
+  }
+
+  const tr = state.tr;
+  const seen = new Set<number>();
+  let changed = false;
+
+  for (let row = 0; row < rect.map.height; row += 1) {
+    for (let col = rect.left; col < rect.right; col += 1) {
+      const relPos = rect.map.map[row * rect.map.width + col];
+      if (seen.has(relPos)) {
+        continue;
+      }
+      seen.add(relPos);
+      const absPos = rect.tableStart + relPos;
+      const cellNode = state.doc.nodeAt(absPos);
+      if (!cellNode) {
+        continue;
+      }
+      if (cellNode.attrs.alignment !== align) {
+        tr.setNodeMarkup(absPos, undefined, {
+          ...cellNode.attrs,
+          alignment: align,
+        });
+        changed = true;
+      }
+    }
+  }
+
+  if (changed) {
+    view.dispatch(tr);
+  }
+  view.focus();
+  return changed;
 }
