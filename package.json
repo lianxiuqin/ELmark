@@ -1,0 +1,42 @@
+{
+  "name": "elmark",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ELmark desktop Markdown reader and editor",
+  "license": "MIT",
+  "type": "module",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@milkdown/kit": "^7.19.1",
+    "@milkdown/react": "^7.19.1",
+    "dompurify": "^3.2.4",
+    "highlight.js": "^11.11.1",
+    "lowlight": "^3.3.0",
+    "mermaid": "^11.4.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.2.0",
+    "@types/dompurify": "^3.2.0",
+    "@types/node": "^22.13.5",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^35.0.0",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^3.0.0",
+    "jsdom": "^26.0.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.1",
+    "vitest": "^3.0.7"
+  }
+}
