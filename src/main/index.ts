@@ -11,6 +11,7 @@ import {
   net,
   protocol,
   screen,
+  session,
   shell,
   type IpcMainEvent,
   type IpcMainInvokeEvent,
@@ -29,6 +30,7 @@ import {
 } from './fileTree';
 import { DocumentFileWatcher } from './fileWatcher';
 import { decodeLocalAssetUrl, LOCAL_PROTOCOL_SCHEME } from './localProtocol';
+import { buildCspHeader } from './csp';
 import { buildAppMenuTemplate } from './menu';
 import { exportWindowToPdf } from './pdfExport';
 
@@ -300,6 +302,34 @@ function registerProtocolHandlers(): void {
   });
 }
 
+function registerCspHeaders(): void {
+  const rendererUrl = process.env['ELECTRON_RENDERER_URL'];
+  const csp = buildCspHeader(Boolean(rendererUrl));
+
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    const isAppDocument =
+      details.resourceType === 'mainFrame' ||
+      details.url.startsWith('file://') ||
+      Boolean(rendererUrl && details.url.startsWith(rendererUrl));
+
+    if (!isAppDocument) {
+      callback({ responseHeaders: details.responseHeaders });
+      return;
+    }
+
+    const responseHeaders: Record<string, string | string[]> = {
+      ...(details.responseHeaders ?? {}),
+    };
+    for (const key of Object.keys(responseHeaders)) {
+      if (key.toLowerCase() === 'content-security-policy') {
+        delete responseHeaders[key];
+      }
+    }
+    responseHeaders['Content-Security-Policy'] = [csp];
+    callback({ responseHeaders });
+  });
+}
+
 function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.FILE_OPEN_DIALOG, async (event) => {
     const win = getWindowFromEvent(event);
@@ -470,6 +500,7 @@ function registerIpcHandlers(): void {
 
 app.whenReady().then(() => {
   registerProtocolHandlers();
+  registerCspHeaders();
   registerIpcHandlers();
 
   const appMenu = Menu.buildFromTemplate(

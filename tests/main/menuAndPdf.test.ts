@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { buildCspHeader } from '../../src/main/csp';
 import { buildAppMenuTemplate } from '../../src/main/menu';
 import { exportWindowToPdf } from '../../src/main/pdfExport';
 
@@ -40,5 +41,22 @@ describe('exportWindowToPdf', () => {
     expect(saved).toBeNull();
     expect(mockWin.webContents.printToPDF).not.toHaveBeenCalled();
     expect(mockWrite).not.toHaveBeenCalled();
+  });
+});
+
+describe('buildCspHeader', () => {
+  it('allows remote https/http and elmark-local images while blocking unsafe-inline scripts in production', () => {
+    const csp = buildCspHeader(false);
+    expect(csp).toContain("default-src 'self'");
+    expect(csp).toContain("script-src 'self'");
+    expect(csp).not.toContain("script-src 'self' 'unsafe-inline'");
+    expect(csp).toContain("img-src 'self' elmark-local: https: http: data: blob:");
+  });
+
+  it('allows Vite HMR connect-src and inline React Refresh script preamble in development', () => {
+    const csp = buildCspHeader(true);
+    expect(csp).toContain("script-src 'self' 'unsafe-inline'");
+    expect(csp).toContain("connect-src 'self' ws: http:");
+    expect(csp).toContain("img-src 'self' elmark-local: https: http: data: blob:");
   });
 });
