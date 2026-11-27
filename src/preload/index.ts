@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
+import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
 import {
   IPC_CHANNELS,
   type ElmarkApi,
@@ -44,6 +44,7 @@ const elmarkApi: ElmarkApi = {
     ipcRenderer.invoke(IPC_CHANNELS.WINDOW_CONFIRM_DISCARD, fileName),
   getInitialFile: () => ipcRenderer.invoke(IPC_CHANNELS.APP_GET_INITIAL_FILE),
   newWindow: () => ipcRenderer.send(IPC_CHANNELS.WINDOW_NEW),
+  getPathForFile: (file: File) => webUtils.getPathForFile(file),
 };
 
 contextBridge.exposeInMainWorld('elmark', elmarkApi);

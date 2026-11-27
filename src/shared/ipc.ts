@@ -83,6 +83,7 @@ export interface ElmarkApi {
   confirmDiscard(fileName: string): Promise<DiscardChoice>;
   getInitialFile(): Promise<string | null>;
   newWindow(): void;
+  getPathForFile?: (file: File) => string;
 }
 
 declare global {
